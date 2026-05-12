@@ -26,6 +26,8 @@ private let defaultRightControlShortcut = Shortcut(
     flags: .maskControl,
     display: "右⌃"
 )
+private let rightControlLongPressThreshold: TimeInterval = 0.10
+private let rightControlDoubleTapWindow: TimeInterval = 0.45
 
 private final class InputSourceService {
     private var previousSourceID: String?
@@ -156,33 +158,31 @@ private enum ShortcutSender {
         tap(shortcut: shortcut)
     }
 
+    static func singleTap(shortcut: Shortcut) {
+        tap(shortcut: shortcut)
+    }
+
     static func keyDown(shortcut: Shortcut) {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        let event = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: true)
-        event?.flags = shortcut.flags
-        event?.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
-        event?.post(tap: .cghidEventTap)
+        postModifierEvent(shortcut: shortcut, keyDown: true)
     }
 
     static func keyUp(shortcut: Shortcut) {
+        postModifierEvent(shortcut: shortcut, keyDown: false)
+    }
+
+    private static func postModifierEvent(shortcut: Shortcut, keyDown: Bool) {
         let source = CGEventSource(stateID: .combinedSessionState)
-        let event = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: false)
-        event?.flags = []
+        let event = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: keyDown)
+        event?.type = .flagsChanged
+        event?.flags = keyDown ? shortcut.flags : []
         event?.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
         event?.post(tap: .cghidEventTap)
     }
 
     private static func tap(shortcut: Shortcut) {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        let down = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: true)
-        let up = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: false)
-        down?.flags = shortcut.flags
-        up?.flags = []
-        down?.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
-        up?.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
-        down?.post(tap: .cghidEventTap)
+        postModifierEvent(shortcut: shortcut, keyDown: true)
         usleep(60_000)
-        up?.post(tap: .cghidEventTap)
+        postModifierEvent(shortcut: shortcut, keyDown: false)
     }
 }
 
@@ -197,6 +197,7 @@ private final class RightControlAutomation {
     private var sessionActive = false
     private var longPressWorkItem: DispatchWorkItem?
     private var didTriggerLongPress = false
+    private var resumeEventTapWorkItem: DispatchWorkItem?
 
     var onStatus: ((String) -> Void)?
 
@@ -247,6 +248,8 @@ private final class RightControlAutomation {
     }
 
     func stop() {
+        resumeEventTapWorkItem?.cancel()
+        resumeEventTapWorkItem = nil
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
         }
@@ -313,9 +316,19 @@ private final class RightControlAutomation {
         isRightControlDown = true
         didTriggerLongPress = false
         rightControlDownAt = ProcessInfo.processInfo.systemUptime
+        let pressStartedAt = rightControlDownAt
+
+        if sessionActive {
+            onStatus?("检测到右⌃按下，将结束免按语音输入。")
+            return
+        }
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.isRightControlDown else {
+                return
+            }
+            let heldDuration = ProcessInfo.processInfo.systemUptime - pressStartedAt
+            guard heldDuration >= rightControlLongPressThreshold else {
                 return
             }
             guard self.inputSourceService.beginDoubaoSession() else {
@@ -323,11 +336,13 @@ private final class RightControlAutomation {
                 return
             }
             self.didTriggerLongPress = true
-            ShortcutSender.keyDown(shortcut: self.shortcut)
+            self.forwardShortcutEvent {
+                ShortcutSender.keyDown(shortcut: self.shortcut)
+            }
             self.onStatus?("检测到右⌃长按，已切到豆包并开始语音输入。")
         }
         longPressWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + rightControlLongPressThreshold, execute: workItem)
     }
 
     private func handleRightControlUp() {
@@ -338,30 +353,42 @@ private final class RightControlAutomation {
         longPressWorkItem = nil
 
         if didTriggerLongPress {
-            ShortcutSender.keyUp(shortcut: self.shortcut)
+            forwardShortcutEvent {
+                ShortcutSender.keyUp(shortcut: self.shortcut)
+            }
             didTriggerLongPress = false
             sessionActive = false
             restoreAfterDelay(message: "右⌃长按结束，已恢复原输入法。", delay: 0.45)
             return
         }
 
-        if now - lastShortTapUpAt <= 0.45 {
-            if sessionActive {
-                guard inputSourceService.beginDoubaoSession() else {
-                    onStatus?("切换到豆包输入法失败。")
-                    return
+        if sessionActive {
+            guard inputSourceService.beginDoubaoSession() else {
+                onStatus?("切换到豆包输入法失败。")
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                self.forwardShortcutEvent {
+                    ShortcutSender.singleTap(shortcut: self.shortcut)
                 }
-                ShortcutSender.doubleTap(shortcut: shortcut)
-                sessionActive = false
-                restoreAfterDelay(message: "检测到免按模式结束双击，已恢复原输入法。", delay: 0.45)
-            } else {
-                guard inputSourceService.beginDoubaoSession() else {
-                    onStatus?("切换到豆包输入法失败。")
-                    return
+                self.sessionActive = false
+                self.restoreAfterDelay(message: "检测到右⌃单击结束免按语音输入，已恢复原输入法。", delay: 0.45)
+            }
+            lastShortTapUpAt = 0
+            return
+        }
+
+        if now - lastShortTapUpAt <= rightControlDoubleTapWindow {
+            guard inputSourceService.beginDoubaoSession() else {
+                onStatus?("切换到豆包输入法失败。")
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                self.forwardShortcutEvent {
+                    ShortcutSender.doubleTap(shortcut: self.shortcut)
                 }
-                ShortcutSender.doubleTap(shortcut: shortcut)
-                sessionActive = true
-                onStatus?("检测到右⌃双击，已切到豆包并开启免按语音输入。")
+                self.sessionActive = true
+                self.onStatus?("检测到右⌃双击，已切到豆包并转发免按语音快捷键。")
             }
             lastShortTapUpAt = 0
             return
@@ -369,6 +396,24 @@ private final class RightControlAutomation {
 
         lastShortTapUpAt = now
         onStatus?("检测到一次右⌃短按，等待第二次短按。")
+    }
+
+    private func forwardShortcutEvent(_ send: () -> Void) {
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+
+        send()
+
+        resumeEventTapWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, let eventTap = self.eventTap else {
+                return
+            }
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+        }
+        resumeEventTapWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: workItem)
     }
 
     private func restoreAfterDelay(message: String, delay: TimeInterval) {
