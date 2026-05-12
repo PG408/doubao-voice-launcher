@@ -327,7 +327,7 @@ private final class RightControlAutomation {
             self.onStatus?("检测到右⌃长按，已切到豆包并开始语音输入。")
         }
         longPressWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10, execute: workItem)
     }
 
     private func handleRightControlUp() {
