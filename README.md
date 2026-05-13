@@ -23,7 +23,7 @@
 
 ## 安装
 
-1. 在 GitHub Releases 下载 `豆包语音输入切换.zip`。
+1. 在 GitHub Releases 下载 `DoubaoVoiceLauncher.zip`。
 2. 解压后，将 `豆包语音输入切换.app` 拖入“应用程序”目录。
 3. 首次打开时，如果 macOS 提示“无法验证开发者”，可右键点击应用并选择“打开”，或在“系统设置 - 隐私与安全性”中允许打开。
 4. 按应用界面提示开启“辅助功能”和“输入监控”权限；若授权后仍未生效，退出并重新打开应用。
@@ -54,7 +54,7 @@
 该命令会生成：
 
 - `dist/豆包语音输入切换.app`
-- `dist/豆包语音输入切换.zip`
+- `dist/DoubaoVoiceLauncher.zip`
 
 默认构建配置为 release。如需临时使用 debug 构建，可执行：
 
@@ -67,7 +67,7 @@
 1. 将源码提交到 GitHub 仓库。
 2. 本地执行 `./script/build_and_run.sh --package`。
 3. 在 GitHub Releases 创建新版本。
-4. 上传 `dist/豆包语音输入切换.zip`。
+4. 上传 `dist/DoubaoVoiceLauncher.zip`。
 5. 在 Release notes 中说明系统要求、权限要求、未公证状态和架构限制。
 
 不建议将 `.app`、`.zip` 或 `.build` 目录直接提交到仓库。
