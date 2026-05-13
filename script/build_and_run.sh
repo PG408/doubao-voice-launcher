@@ -47,7 +47,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>NSInputMonitoringUsageDescription</key>
-  <string>用于监听右 Control 快捷键，以便自动切换到豆包语音输入。</string>
+  <string>用于监听已录制的语音输入快捷键，以便自动切换到豆包语音输入。</string>
 </dict>
 </plist>
 PLIST
