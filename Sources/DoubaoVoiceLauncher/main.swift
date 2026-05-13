@@ -5,6 +5,9 @@ import Foundation
 
 private let doubaoInputSourceID = "com.bytedance.inputmethod.doubaoime.pinyin"
 private let appDisplayName = "豆包语音输入切换"
+private let launcherWindowWidth: CGFloat = 510
+private let launcherWindowHeight: CGFloat = 480
+private let launcherContentWidth: CGFloat = 450
 private let doubaoPreferenceDomains = [
     "com.bytedance.inputmethod.doubaoime",
     "com.bytedance.inputmethod.doubaoime.settings"
@@ -766,14 +769,17 @@ private final class LauncherViewController: NSViewController {
     private var shortcutPickerPopover: NSPopover?
     private var isMonitoring = false
 
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let holdShortcutButton = NSButton(title: "", target: nil, action: nil)
-    private let doubleTapShortcutButton = NSButton(title: "", target: nil, action: nil)
-    private let triggerButton = NSButton(title: "开始/停止语音输入", target: nil, action: nil)
-    private let monitorToggleButton = NSButton(title: "", target: nil, action: nil)
+    private let messageLabel = NSTextField(labelWithString: "")
+    private let monitorStatusValueLabel = NSTextField(labelWithString: "")
+    private let doubaoStatusValueLabel = NSTextField(labelWithString: "")
+    private let currentInputValueLabel = NSTextField(labelWithString: "")
+    private let holdShortcutButton = ShortcutSelectButton(title: "")
+    private let doubleTapShortcutButton = ShortcutSelectButton(title: "")
+    private let monitorToggleButton = PrimaryActionButton(title: "开始监听")
+    private let monitorStatusDotView = NSView()
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 380))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: launcherWindowWidth, height: launcherWindowHeight))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         view = root
@@ -796,102 +802,283 @@ private final class LauncherViewController: NSViewController {
 
     private func buildUI() {
         let titleLabel = NSTextField(labelWithString: appDisplayName)
-        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 25, weight: .semibold)
 
-        let explanationLabel = NSTextField(labelWithString: "后台监听已选择快捷键：长按或双击时自动切到豆包；结束后自动恢复原输入法。")
-        explanationLabel.font = .systemFont(ofSize: 13)
+        let explanationLabel = NSTextField(labelWithString: "自动切换到豆包语音输入，结束后恢复原输入法")
+        explanationLabel.font = .systemFont(ofSize: 15)
         explanationLabel.textColor = .secondaryLabelColor
+        explanationLabel.lineBreakMode = .byWordWrapping
 
-        statusLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        statusLabel.lineBreakMode = .byWordWrapping
-
-        let holdLabel = NSTextField(labelWithString: "长按模式")
-        holdLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        let holdDescription = NSTextField(labelWithString: "按住说话，松手结束")
-        holdDescription.font = .systemFont(ofSize: 12)
-        holdDescription.textColor = .secondaryLabelColor
-        let holdTextStack = NSStackView(views: [holdLabel, holdDescription])
-        holdTextStack.orientation = .vertical
-        holdTextStack.spacing = 2
-
-        let doubleTapLabel = NSTextField(labelWithString: "免按模式")
-        doubleTapLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        let doubleTapDescription = NSTextField(labelWithString: "双击开始，再次按键结束")
-        doubleTapDescription.font = .systemFont(ofSize: 12)
-        doubleTapDescription.textColor = .secondaryLabelColor
-        let doubleTapTextStack = NSStackView(views: [doubleTapLabel, doubleTapDescription])
-        doubleTapTextStack.orientation = .vertical
-        doubleTapTextStack.spacing = 2
+        messageLabel.font = .systemFont(ofSize: 13)
+        messageLabel.textColor = .secondaryLabelColor
+        messageLabel.lineBreakMode = .byWordWrapping
+        messageLabel.stringValue = "正在检查状态..."
 
         holdShortcutButton.target = self
         holdShortcutButton.action = #selector(showHoldShortcutPicker(_:))
-        holdShortcutButton.bezelStyle = .rounded
-        holdShortcutButton.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        holdShortcutButton.widthAnchor.constraint(equalToConstant: 112).isActive = true
 
         doubleTapShortcutButton.target = self
         doubleTapShortcutButton.action = #selector(showDoubleTapShortcutPicker(_:))
-        doubleTapShortcutButton.bezelStyle = .rounded
-        doubleTapShortcutButton.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        doubleTapShortcutButton.widthAnchor.constraint(equalToConstant: 112).isActive = true
         updateShortcutButtons()
 
-        triggerButton.target = self
-        triggerButton.action = #selector(triggerVoiceInput)
-        triggerButton.bezelStyle = .rounded
+        let openSettingsButton = IconActionButton(title: "打开豆包设置", symbolName: "gearshape")
+        openSettingsButton.target = self
+        openSettingsButton.action = #selector(openDoubaoSettings)
 
-        let restoreButton = NSButton(title: "恢复原输入法", target: self, action: #selector(restoreInputSource))
-        restoreButton.bezelStyle = .rounded
+        let accessibilityButton = IconActionButton(title: "辅助功能", symbolName: "checkmark.shield")
+        accessibilityButton.target = self
+        accessibilityButton.action = #selector(openAccessibilitySettings)
 
-        let reloadButton = NSButton(title: "重读豆包快捷键", target: self, action: #selector(reloadShortcut))
-        reloadButton.bezelStyle = .rounded
-
-        let openSettingsButton = NSButton(title: "打开豆包设置", target: self, action: #selector(openDoubaoSettings))
-        openSettingsButton.bezelStyle = .rounded
-
-        let openAccessibilityButton = NSButton(title: "打开辅助功能设置", target: self, action: #selector(openAccessibilitySettings))
-        openAccessibilityButton.bezelStyle = .rounded
-
-        let openInputMonitoringButton = NSButton(title: "打开输入监控设置", target: self, action: #selector(openInputMonitoringSettings))
-        openInputMonitoringButton.bezelStyle = .rounded
+        let inputMonitoringButton = IconActionButton(title: "输入监控", symbolName: "keyboard")
+        inputMonitoringButton.target = self
+        inputMonitoringButton.action = #selector(openInputMonitoringSettings)
 
         monitorToggleButton.target = self
         monitorToggleButton.action = #selector(toggleMonitoring)
-        monitorToggleButton.bezelStyle = .rounded
         updateMonitorToggleButton()
 
-        let shortcutForm = NSGridView(views: [
-            [holdTextStack, holdShortcutButton],
-            [doubleTapTextStack, doubleTapShortcutButton]
+        [openSettingsButton, accessibilityButton, inputMonitoringButton].forEach(configureSecondaryButton)
+        configureShortcutButton(holdShortcutButton)
+        configureShortcutButton(doubleTapShortcutButton)
+
+        let statusContent = NSStackView(views: [
+            makeStatusItem(symbolName: "waveform", valueLabel: monitorStatusValueLabel, caption: "运行状态", showsDot: true),
+            makeVerticalDivider(),
+            makeStatusItem(symbolName: "checkmark.circle", valueLabel: doubaoStatusValueLabel, caption: "豆包输入法", showsDot: false),
+            makeVerticalDivider(),
+            makeStatusItem(symbolName: "keyboard", valueLabel: currentInputValueLabel, caption: "当前输入源", showsDot: false)
         ])
-        shortcutForm.rowSpacing = 10
-        shortcutForm.columnSpacing = 16
-        shortcutForm.column(at: 0).xPlacement = .leading
+        statusContent.orientation = .horizontal
+        statusContent.spacing = 0
+        statusContent.alignment = .centerY
+        statusContent.distribution = .fill
+        let statusCard = makeRoundedContainer(content: statusContent, horizontalPadding: 18, verticalPadding: 15)
 
-        let buttonRow = NSStackView(views: [triggerButton, monitorToggleButton, restoreButton, openSettingsButton])
-        buttonRow.orientation = .horizontal
-        buttonRow.spacing = 8
-        buttonRow.distribution = .fillEqually
+        let shortcutContent = NSStackView(views: [
+            makePlainShortcutRow(
+                title: "长按模式",
+                detail: "按住说话，松手结束",
+                button: holdShortcutButton
+            ),
+            makeHorizontalDivider(),
+            makePlainShortcutRow(
+                title: "免按模式",
+                detail: "双击开始，再次按键结束",
+                button: doubleTapShortcutButton
+            )
+        ])
+        shortcutContent.orientation = .vertical
+        shortcutContent.spacing = 0
+        shortcutContent.alignment = .leading
+        let shortcutSectionTitle = NSTextField(labelWithString: "快捷键")
+        shortcutSectionTitle.font = .systemFont(ofSize: 15, weight: .semibold)
+        let shortcutCard = makeRoundedContainer(content: shortcutContent, horizontalPadding: 18, verticalPadding: 14)
 
-        let secondaryButtonRow = NSStackView(views: [openAccessibilityButton, openInputMonitoringButton, reloadButton])
-        secondaryButtonRow.orientation = .horizontal
-        secondaryButtonRow.spacing = 8
-        secondaryButtonRow.distribution = .fillEqually
+        let secondaryButtonRow = makeBottomActionBar(buttons: [openSettingsButton, accessibilityButton, inputMonitoringButton])
 
-        let stack = NSStackView(views: [titleLabel, explanationLabel, statusLabel, shortcutForm, buttonRow, secondaryButtonRow])
+        let stack = NSStackView(views: [titleLabel, explanationLabel, statusCard, monitorToggleButton, shortcutSectionTitle, shortcutCard])
         stack.orientation = .vertical
-        stack.spacing = 14
+        stack.spacing = 13
         stack.alignment = .leading
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         view.addSubview(stack)
+        view.addSubview(secondaryButtonRow)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
-            statusLabel.widthAnchor.constraint(equalToConstant: 512),
-            shortcutForm.widthAnchor.constraint(equalToConstant: 512),
-            buttonRow.widthAnchor.constraint(equalToConstant: 512),
-            secondaryButtonRow.widthAnchor.constraint(equalToConstant: 512)
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 30),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -30),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 30),
+            titleLabel.widthAnchor.constraint(equalToConstant: launcherContentWidth),
+            explanationLabel.widthAnchor.constraint(equalToConstant: launcherContentWidth),
+            statusCard.widthAnchor.constraint(equalToConstant: launcherContentWidth),
+            monitorToggleButton.widthAnchor.constraint(equalToConstant: launcherContentWidth),
+            monitorToggleButton.heightAnchor.constraint(equalToConstant: 37),
+            shortcutSectionTitle.widthAnchor.constraint(equalToConstant: launcherContentWidth),
+            shortcutCard.widthAnchor.constraint(equalToConstant: launcherContentWidth),
+            secondaryButtonRow.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            secondaryButtonRow.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            secondaryButtonRow.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            secondaryButtonRow.heightAnchor.constraint(equalToConstant: 37)
         ])
+    }
+
+    private func makeRoundedContainer(content: NSView, horizontalPadding: CGFloat, verticalPadding: CGFloat) -> NSView {
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let card = NSView()
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 14
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.26).cgColor
+        card.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.18).cgColor
+        card.addSubview(content)
+
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: horizontalPadding),
+            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -horizontalPadding),
+            content.topAnchor.constraint(equalTo: card.topAnchor, constant: verticalPadding),
+            content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -verticalPadding)
+        ])
+        return card
+    }
+
+    private func makeStatusItem(symbolName: String, valueLabel: NSTextField, caption: String, showsDot: Bool) -> NSView {
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+        icon.contentTintColor = .systemBlue
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 24, weight: .medium)
+        icon.widthAnchor.constraint(equalToConstant: 30).isActive = true
+
+        valueLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        valueLabel.textColor = .labelColor
+        valueLabel.lineBreakMode = .byTruncatingMiddle
+
+        let valueRow = NSStackView(views: [valueLabel])
+        valueRow.orientation = .horizontal
+        valueRow.spacing = 8
+        if showsDot {
+            monitorStatusDotView.wantsLayer = true
+            monitorStatusDotView.layer?.cornerRadius = 4
+            monitorStatusDotView.layer?.backgroundColor = NSColor.systemRed.cgColor
+            monitorStatusDotView.widthAnchor.constraint(equalToConstant: 8).isActive = true
+            monitorStatusDotView.heightAnchor.constraint(equalToConstant: 8).isActive = true
+            valueRow.addArrangedSubview(monitorStatusDotView)
+        }
+
+        let captionLabel = NSTextField(labelWithString: caption)
+        captionLabel.font = .systemFont(ofSize: 12)
+        captionLabel.textColor = .secondaryLabelColor
+
+        let textStack = NSStackView(views: [valueRow, captionLabel])
+        textStack.orientation = .vertical
+        textStack.spacing = 4
+        textStack.alignment = .leading
+
+        let container = NSView()
+        container.addSubview(icon)
+        container.addSubview(textStack)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: 137),
+            icon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            icon.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            textStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 54),
+            textStack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            textStack.widthAnchor.constraint(equalToConstant: 72)
+        ])
+        return container
+    }
+
+    private func makePlainShortcutRow(title: String, detail: String, button: NSButton) -> NSView {
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        let detailLabel = NSTextField(labelWithString: detail)
+        detailLabel.font = .systemFont(ofSize: 13)
+        detailLabel.textColor = .secondaryLabelColor
+
+        let textStack = NSStackView(views: [titleLabel, detailLabel])
+        textStack.orientation = .vertical
+        textStack.spacing = 5
+        textStack.alignment = .leading
+        textStack.widthAnchor.constraint(equalToConstant: 248).isActive = true
+        textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView(views: [textStack, button])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.distribution = .fill
+        row.spacing = 42
+        row.widthAnchor.constraint(equalToConstant: 414).isActive = true
+        row.heightAnchor.constraint(equalToConstant: 58).isActive = true
+        textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        return row
+    }
+
+    private func makeVerticalDivider() -> NSView {
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.24).cgColor
+        divider.widthAnchor.constraint(equalToConstant: 1).isActive = true
+        divider.heightAnchor.constraint(equalToConstant: 42).isActive = true
+        return divider
+    }
+
+    private func makeHorizontalDivider() -> NSView {
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        divider.widthAnchor.constraint(equalToConstant: 414).isActive = true
+        return divider
+    }
+
+    private func configureSecondaryButton(_ button: NSButton) {
+        button.heightAnchor.constraint(equalToConstant: 36).isActive = true
+    }
+
+    private func makeBottomActionBar(buttons: [NSButton]) -> NSView {
+        let topDivider = NSView()
+        topDivider.translatesAutoresizingMaskIntoConstraints = false
+        topDivider.wantsLayer = true
+        topDivider.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.24).cgColor
+
+        let dividers = (0..<max(0, buttons.count - 1)).map { _ -> NSView in
+            let divider = NSView()
+            divider.wantsLayer = true
+            divider.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
+            divider.widthAnchor.constraint(equalToConstant: 1).isActive = true
+            divider.heightAnchor.constraint(equalToConstant: 21).isActive = true
+            return divider
+        }
+
+        var rowViews: [NSView] = []
+        for (index, button) in buttons.enumerated() {
+            rowViews.append(button)
+            if index < dividers.count {
+                rowViews.append(dividers[index])
+            }
+        }
+
+        let row = NSStackView(views: rowViews)
+        row.orientation = .horizontal
+        row.spacing = 0
+        row.alignment = .centerY
+        row.distribution = .fill
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let buttonWidth = (launcherWindowWidth - CGFloat(dividers.count)) / CGFloat(buttons.count)
+        buttons.forEach { $0.widthAnchor.constraint(equalToConstant: buttonWidth).isActive = true }
+
+        let bar = NSView()
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.wantsLayer = true
+        bar.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.06).cgColor
+        bar.addSubview(topDivider)
+        bar.addSubview(row)
+        NSLayoutConstraint.activate([
+            topDivider.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            topDivider.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            topDivider.topAnchor.constraint(equalTo: bar.topAnchor),
+            topDivider.heightAnchor.constraint(equalToConstant: 1),
+            row.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            row.topAnchor.constraint(equalTo: bar.topAnchor, constant: 1),
+            row.bottomAnchor.constraint(equalTo: bar.bottomAnchor)
+        ])
+        return bar
+    }
+
+    private func configureShortcutButton(_ button: NSButton) {
+        button.font = .systemFont(ofSize: 15, weight: .medium)
+        button.heightAnchor.constraint(equalToConstant: 33).isActive = true
+    }
+
+    private func setSymbol(_ symbolName: String, on button: NSButton) {
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+        button.contentTintColor = .controlTextColor
     }
 
     private func refreshStatus(_ message: String? = nil) {
@@ -900,56 +1087,36 @@ private final class LauncherViewController: NSViewController {
         }
 
         let installed = inputSourceService.isDoubaoInstalled() ? "已安装" : "未安装"
-        let current = inputSourceService.currentSourceID() ?? "未知"
-        let prefix = statusMessage.map { "\($0)\n" } ?? ""
-        statusLabel.stringValue = "\(prefix)豆包输入法：\(installed)\n当前输入源：\(current)\n长按模式：\(holdShortcut.display)\n免按模式：\(doubleTapShortcut.display)"
+        let current = displayName(forInputSourceID: inputSourceService.currentSourceID())
+        messageLabel.stringValue = statusMessage ?? "监听开启后，仅已选择的快捷键会触发自动切换。"
+        monitorStatusValueLabel.stringValue = isMonitoring ? "监听中" : "已暂停"
+        monitorStatusDotView.layer?.backgroundColor = (isMonitoring ? NSColor.systemGreen : NSColor.systemRed).cgColor
+        doubaoStatusValueLabel.stringValue = installed
+        currentInputValueLabel.stringValue = current
+    }
+
+    private func displayName(forInputSourceID sourceID: String?) -> String {
+        guard let sourceID else {
+            return "未知"
+        }
+        if sourceID == doubaoInputSourceID {
+            return "豆包输入法"
+        }
+        if sourceID.contains("sogou") {
+            return "搜狗拼音"
+        }
+        return sourceID
     }
 
     private func updateShortcutButtons() {
-        holdShortcutButton.title = "选择：\(holdShortcut.display)"
-        doubleTapShortcutButton.title = "选择：\(doubleTapShortcut.display)"
+        holdShortcutButton.title = holdShortcut.display
+        doubleTapShortcutButton.title = doubleTapShortcut.display
     }
 
     private func updateMonitorToggleButton() {
-        monitorToggleButton.title = isMonitoring ? "暂停监听" : "开始监听"
-    }
-
-    @objc private func triggerVoiceInput() {
-        guard inputSourceService.isDoubaoInstalled() else {
-            refreshStatus("未检测到豆包输入法。请先运行官方安装器并在系统输入法中启用豆包。")
-            return
-        }
-
-        guard AccessibilityService.ensureTrusted() else {
-            refreshStatus("需要在系统设置中授予本 App 辅助功能权限后才能发送快捷键。")
-            return
-        }
-
-        guard inputSourceService.selectDoubao() else {
-            refreshStatus("切换到豆包输入法失败。")
-            return
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-            ShortcutSender.doubleTap(shortcut: self.doubleTapShortcut)
-            self.refreshStatus("已切换到豆包输入法，并按免按模式双击“\(self.doubleTapShortcut.display)”。")
-        }
-    }
-
-    @objc private func restoreInputSource() {
-        let ok = inputSourceService.restorePrevious()
-        refreshStatus(ok ? "已恢复原输入法。" : "没有可恢复的历史输入法。")
-    }
-
-    @objc private func reloadShortcut() {
-        let shortcut = PreferenceReader.loadShortcut() ?? defaultRightControlShortcut
-        holdShortcut = shortcut
-        doubleTapShortcut = shortcut
-        ShortcutDefaults.saveHoldShortcut(shortcut)
-        ShortcutDefaults.saveDoubleTapShortcut(shortcut)
-        automation.updateShortcuts(hold: holdShortcut, doubleTap: doubleTapShortcut)
-        updateShortcutButtons()
-        refreshStatus("已重读豆包快捷键；未读到配置时回退为右⌃。")
+        let title = isMonitoring ? "暂停监听" : "开始监听"
+        monitorToggleButton.title = title
+        monitorToggleButton.symbolName = isMonitoring ? "pause.circle.fill" : "play.circle.fill"
     }
 
     @objc private func toggleMonitoring() {
@@ -990,6 +1157,7 @@ private final class LauncherViewController: NSViewController {
 
         let popover = NSPopover()
         let controller = ShortcutPickerViewController(title: title, currentShortcut: currentShortcut)
+        controller.preferredContentSize = NSSize(width: 202, height: 150)
         controller.onApply = { [weak self, weak popover] shortcut in
             guard let self else {
                 return
@@ -1012,8 +1180,9 @@ private final class LauncherViewController: NSViewController {
             popover?.close()
         }
         popover.contentViewController = controller
+        popover.contentSize = NSSize(width: 202, height: 150)
         popover.behavior = .transient
-        popover.show(relativeTo: sourceButton.bounds, of: sourceButton, preferredEdge: .maxY)
+        popover.show(relativeTo: sourceButton.bounds, of: sourceButton, preferredEdge: .minX)
         shortcutPickerPopover = popover
     }
 
@@ -1056,7 +1225,7 @@ private final class ShortcutPickerViewController: NSViewController {
     private let panelTitle: String
     private let currentShortcut: Shortcut
     private let validationLabel = NSTextField(labelWithString: "")
-    private var candidateButtons: [CGKeyCode: NSButton] = [:]
+    private var candidateButtons: [CGKeyCode: ShortcutChoiceButton] = [:]
 
     init(title: String, currentShortcut: Shortcut) {
         self.panelTitle = title
@@ -1070,7 +1239,10 @@ private final class ShortcutPickerViewController: NSViewController {
     }
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 300))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 202, height: 150))
+        root.wantsLayer = true
+        root.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.32).cgColor
+        view = root
     }
 
     override func viewDidLoad() {
@@ -1080,30 +1252,34 @@ private final class ShortcutPickerViewController: NSViewController {
 
     private func buildUI() {
         let titleLabel = NSTextField(labelWithString: panelTitle)
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
 
-        let descriptionLabel = NSTextField(labelWithString: "勾选一个或多个候选按键作为组合快捷键。")
-        descriptionLabel.font = .systemFont(ofSize: 12)
+        let descriptionLabel = NSTextField(labelWithString: "可多选组合键。")
+        descriptionLabel.font = .systemFont(ofSize: 11)
         descriptionLabel.textColor = .secondaryLabelColor
 
         let grid = NSGridView()
-        grid.rowSpacing = 8
-        grid.columnSpacing = 12
+        grid.rowSpacing = 6
+        grid.columnSpacing = 6
 
         let currentKeyCodes = Set(currentShortcut.keyCodes)
         let candidates = ShortcutFormatter.candidates
         for rowIndex in stride(from: 0, to: candidates.count, by: 3) {
             let rowCandidates = Array(candidates[rowIndex..<min(rowIndex + 3, candidates.count)])
             let buttons = rowCandidates.map { candidate in
-                let button = NSButton(checkboxWithTitle: candidate.title, target: self, action: #selector(candidateSelectionChanged))
+                let button = ShortcutChoiceButton(title: candidate.title)
+                button.target = self
+                button.action = #selector(candidateSelectionChanged)
                 button.state = currentKeyCodes.contains(candidate.keyCode) ? .on : .off
+                button.widthAnchor.constraint(equalToConstant: 54).isActive = true
+                button.heightAnchor.constraint(equalToConstant: 23).isActive = true
                 candidateButtons[candidate.keyCode] = button
                 return button
             }
             grid.addRow(with: buttons)
         }
 
-        validationLabel.font = .systemFont(ofSize: 12)
+        validationLabel.font = .systemFont(ofSize: 11, weight: .medium)
         validationLabel.textColor = .secondaryLabelColor
         refreshValidationText()
 
@@ -1113,29 +1289,42 @@ private final class ShortcutPickerViewController: NSViewController {
         let applyButton = NSButton(title: "保存", target: self, action: #selector(applySelection))
         applyButton.bezelStyle = .rounded
 
-        let buttonRow = NSStackView(views: [cancelButton, applyButton])
-        buttonRow.orientation = .horizontal
-        buttonRow.spacing = 8
-        buttonRow.alignment = .trailing
+        cancelButton.controlSize = .small
+        applyButton.controlSize = .small
+        cancelButton.widthAnchor.constraint(equalToConstant: 42).isActive = true
+        applyButton.widthAnchor.constraint(equalToConstant: 42).isActive = true
 
-        let stack = NSStackView(views: [titleLabel, descriptionLabel, grid, validationLabel, buttonRow])
+        let buttonRow = NSStackView(views: [validationLabel, cancelButton, applyButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 6
+        buttonRow.alignment = .centerY
+        buttonRow.distribution = .fill
+        validationLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let headerStack = NSStackView(views: [titleLabel, descriptionLabel])
+        headerStack.orientation = .vertical
+        headerStack.spacing = 2
+        headerStack.alignment = .leading
+
+        let stack = NSStackView(views: [headerStack, grid, buttonRow])
         stack.orientation = .vertical
-        stack.spacing = 12
+        stack.spacing = 9
         stack.alignment = .leading
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         view.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            grid.widthAnchor.constraint(equalToConstant: 320),
-            validationLabel.widthAnchor.constraint(equalToConstant: 320),
-            buttonRow.widthAnchor.constraint(equalToConstant: 320)
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -10),
+            grid.widthAnchor.constraint(equalToConstant: 174),
+            buttonRow.widthAnchor.constraint(equalToConstant: 174)
         ])
     }
 
     @objc private func candidateSelectionChanged() {
+        candidateButtons.values.forEach { $0.needsDisplay = true }
         refreshValidationText()
     }
 
@@ -1173,6 +1362,254 @@ private final class ShortcutPickerViewController: NSViewController {
     }
 }
 
+private final class ShortcutChoiceButton: NSButton {
+    init(title: String) {
+        super.init(frame: .zero)
+        self.title = title
+        setButtonType(.toggle)
+        isBordered = false
+        wantsLayer = true
+        font = .systemFont(ofSize: 12, weight: .medium)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var state: NSControl.StateValue {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    override var isHighlighted: Bool {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let selected = state == .on
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+        let fillColor: NSColor = if selected {
+            .systemBlue
+        } else if isHighlighted {
+            NSColor.controlAccentColor.withAlphaComponent(0.10)
+        } else {
+            NSColor.controlBackgroundColor.withAlphaComponent(0.55)
+        }
+        fillColor.setFill()
+        path.fill()
+        NSColor.separatorColor.withAlphaComponent(selected ? 0.0 : 0.22).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: selected ? NSColor.white : NSColor.controlTextColor
+        ]
+        let textSize = title.size(withAttributes: attributes)
+        title.draw(
+            at: NSPoint(x: (bounds.width - textSize.width) / 2, y: bounds.midY - textSize.height / 2),
+            withAttributes: attributes
+        )
+    }
+}
+
+private final class PrimaryActionButton: NSButton {
+    var symbolName: String = "play.circle.fill" {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    init(title: String) {
+        super.init(frame: .zero)
+        self.title = title
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.backgroundColor = NSColor.systemBlue.cgColor
+        font = .systemFont(ofSize: 16, weight: .semibold)
+        contentTintColor = .white
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.systemBlue.setFill()
+        bounds.insetBy(dx: 0.5, dy: 0.5).roundedPath(radius: 8).fill()
+
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 16, weight: .semibold),
+            .foregroundColor: NSColor.white
+        ]
+        let textSize = title.size(withAttributes: textAttributes)
+        let iconSize = NSSize(width: 16, height: 16)
+        let spacing: CGFloat = 8
+        let totalWidth = iconSize.width + spacing + textSize.width
+        let startX = (bounds.width - totalWidth) / 2
+        let centerY = bounds.midY
+
+        let iconRect = NSRect(x: startX, y: centerY - iconSize.height / 2, width: iconSize.width, height: iconSize.height)
+        if symbolName.contains("pause") {
+            drawPauseGlyph(in: iconRect)
+        } else {
+            drawPlayGlyph(in: iconRect)
+        }
+        title.draw(
+            at: NSPoint(x: startX + iconSize.width + spacing, y: centerY - textSize.height / 2),
+            withAttributes: textAttributes
+        )
+    }
+
+    private func drawPlayGlyph(in rect: NSRect) {
+        let circle = NSBezierPath(ovalIn: rect)
+        NSColor.white.setFill()
+        circle.fill()
+
+        let triangle = NSBezierPath()
+        triangle.move(to: NSPoint(x: rect.minX + rect.width * 0.40, y: rect.minY + rect.height * 0.30))
+        triangle.line(to: NSPoint(x: rect.minX + rect.width * 0.40, y: rect.minY + rect.height * 0.70))
+        triangle.line(to: NSPoint(x: rect.minX + rect.width * 0.72, y: rect.midY))
+        triangle.close()
+        NSColor.systemBlue.setFill()
+        triangle.fill()
+    }
+
+    private func drawPauseGlyph(in rect: NSRect) {
+        let circle = NSBezierPath(ovalIn: rect)
+        NSColor.white.setFill()
+        circle.fill()
+
+        let barWidth = rect.width * 0.15
+        let barHeight = rect.height * 0.46
+        let y = rect.midY - barHeight / 2
+        let leftBar = NSBezierPath(roundedRect: NSRect(x: rect.minX + rect.width * 0.34, y: y, width: barWidth, height: barHeight), xRadius: 1.5, yRadius: 1.5)
+        let rightBar = NSBezierPath(roundedRect: NSRect(x: rect.minX + rect.width * 0.54, y: y, width: barWidth, height: barHeight), xRadius: 1.5, yRadius: 1.5)
+        NSColor.systemBlue.setFill()
+        leftBar.fill()
+        rightBar.fill()
+    }
+}
+
+private final class ShortcutSelectButton: NSButton {
+    init(title: String) {
+        super.init(frame: .zero)
+        self.title = title
+        isBordered = false
+        wantsLayer = true
+        font = .systemFont(ofSize: 15, weight: .medium)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isHighlighted: Bool {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.75, dy: 0.75)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
+        let fill = isHighlighted
+            ? NSColor.controlAccentColor.withAlphaComponent(0.10)
+            : NSColor.controlBackgroundColor.withAlphaComponent(0.36)
+        fill.setFill()
+        path.fill()
+        NSColor.separatorColor.withAlphaComponent(0.24).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 15, weight: .medium),
+            .foregroundColor: NSColor.controlTextColor
+        ]
+        let textSize = title.size(withAttributes: textAttributes)
+        let textX = max(12, (bounds.width - textSize.width) / 2 - 6)
+        title.draw(
+            at: NSPoint(x: textX, y: bounds.midY - textSize.height / 2),
+            withAttributes: textAttributes
+        )
+
+        let badgeSize: CGFloat = 14
+        let badgeRect = NSRect(
+            x: bounds.maxX - badgeSize - 10,
+            y: bounds.midY - badgeSize / 2,
+            width: badgeSize,
+            height: badgeSize
+        )
+        NSColor.secondaryLabelColor.withAlphaComponent(0.50).setFill()
+        NSBezierPath(ovalIn: badgeRect).fill()
+
+        let mark = NSBezierPath()
+        mark.lineWidth = 1.6
+        mark.lineCapStyle = .round
+        mark.move(to: NSPoint(x: badgeRect.minX + 4.5, y: badgeRect.minY + 4.5))
+        mark.line(to: NSPoint(x: badgeRect.maxX - 4.5, y: badgeRect.maxY - 4.5))
+        mark.move(to: NSPoint(x: badgeRect.maxX - 4.5, y: badgeRect.minY + 4.5))
+        mark.line(to: NSPoint(x: badgeRect.minX + 4.5, y: badgeRect.maxY - 4.5))
+        NSColor.white.withAlphaComponent(0.92).setStroke()
+        mark.stroke()
+    }
+}
+
+private final class IconActionButton: NSButton {
+    private let symbolName: String
+
+    init(title: String, symbolName: String) {
+        self.symbolName = symbolName
+        super.init(frame: .zero)
+        self.title = title
+        isBordered = false
+        controlSize = .large
+        font = .systemFont(ofSize: 14, weight: .medium)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+            .foregroundColor: NSColor.controlTextColor
+        ]
+        let textSize = title.size(withAttributes: textAttributes)
+        let iconSize = NSSize(width: 16, height: 16)
+        let spacing: CGFloat = 7
+        let totalWidth = iconSize.width + spacing + textSize.width
+        let startX = (bounds.width - totalWidth) / 2
+        let centerY = bounds.midY
+
+        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
+            let imageRect = NSRect(x: startX, y: centerY - iconSize.height / 2, width: iconSize.width, height: iconSize.height)
+            image.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: isEnabled ? 1.0 : 0.35)
+        }
+
+        title.draw(
+            at: NSPoint(x: startX + iconSize.width + spacing, y: centerY - textSize.height / 2),
+            withAttributes: textAttributes
+        )
+    }
+}
+
+private extension NSRect {
+    func roundedPath(radius: CGFloat) -> NSBezierPath {
+        NSBezierPath(roundedRect: self, xRadius: radius, yRadius: radius)
+    }
+}
+
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
 
@@ -1180,17 +1617,34 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         let controller = LauncherViewController()
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: launcherWindowWidth, height: launcherWindowHeight),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = appDisplayName
+        window.titleVisibility = .hidden
         window.contentViewController = controller
         window.center()
+        installCenteredTitle(in: window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
+    }
+
+    private func installCenteredTitle(in window: NSWindow) {
+        guard let titlebarView = window.standardWindowButton(.closeButton)?.superview else {
+            return
+        }
+        let titleLabel = NSTextField(labelWithString: appDisplayName)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titlebarView.addSubview(titleLabel)
+        NSLayoutConstraint.activate([
+            titleLabel.centerXAnchor.constraint(equalTo: titlebarView.centerXAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: titlebarView.centerYAnchor)
+        ])
     }
 }
 
