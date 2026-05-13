@@ -7,19 +7,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$BUNDLE_DISPLAY_NAME.app"
 EXECUTABLE_PATH="$APP_BUNDLE/Contents/MacOS/$PRODUCT_NAME"
-BASE_ICON="/Library/Input Methods/DoubaoIme.app/Contents/Resources/AppIcon.icns"
+BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
+ZIP_PATH="$DIST_DIR/$BUNDLE_DISPLAY_NAME.zip"
 
 cd "$ROOT_DIR"
 
 pkill -x "$PRODUCT_NAME" >/dev/null 2>&1 || true
-swift build -c debug --product "$PRODUCT_NAME"
+swift build -c "$BUILD_CONFIGURATION" --product "$PRODUCT_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-cp ".build/debug/$PRODUCT_NAME" "$EXECUTABLE_PATH"
-if [ -f "$BASE_ICON" ]; then
-  /usr/bin/swift "$ROOT_DIR/script/generate_app_icon.swift" "$BASE_ICON" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-fi
+cp ".build/$BUILD_CONFIGURATION/$PRODUCT_NAME" "$EXECUTABLE_PATH"
+/usr/bin/swift "$ROOT_DIR/script/generate_app_icon.swift" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,6 +34,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key>
   <string>$BUNDLE_DISPLAY_NAME</string>
   <key>CFBundleIconFile</key>
+  <string>AppIcon.icns</string>
+  <key>CFBundleIconName</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
@@ -53,8 +54,16 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 PLIST
 
 /usr/bin/codesign --force --deep --sign - --identifier "com.local.doubao.voice-launcher" "$APP_BUNDLE" >/dev/null
+/usr/bin/touch "$APP_BUNDLE"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" >/dev/null 2>&1 || true
 
 case "${1:-}" in
+  --package)
+    rm -f "$ZIP_PATH"
+    /usr/bin/ditto -c -k --norsrc --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+    echo "Built $APP_BUNDLE"
+    echo "Packaged $ZIP_PATH"
+    ;;
   --verify)
     /usr/bin/open -n "$APP_BUNDLE"
     sleep 1
