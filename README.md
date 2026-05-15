@@ -12,6 +12,7 @@
 - 支持检查豆包输入法安装状态、当前输入源、监听状态。
 - 提供跳转到辅助功能、输入监控和豆包设置的入口。
 - 使用项目自制中性图标，避免与官方应用图标混淆。
+- 使用 macOS unified logging 记录权限、监听、快捷键和输入法切换事件，便于本地调试。
 
 ## 系统要求
 
@@ -59,9 +60,29 @@
 - `dist/豆包语音输入切换.app`
 - `dist/DoubaoVoiceLauncher.zip`
 
-默认构建配置为 release。如需临时使用 debug 构建，可执行：
+默认构建配置为 debug，用于保持快捷键合成事件的运行时行为与当前可用包一致。如需临时使用 release 构建，可执行：
 
-`BUILD_CONFIGURATION=debug ./script/build_and_run.sh --no-run`
+`BUILD_CONFIGURATION=release ./script/build_and_run.sh --no-run`
+
+## 调试日志
+
+应用会把关键调试信息自动保存到：
+
+`~/Library/Logs/DoubaoVoiceLauncher/DoubaoVoiceLauncher.log`
+
+同时，应用仍使用 `com.local.doubao.voice-launcher` 作为 macOS unified logging subsystem，并按 `App`、`UI`、`Permissions`、`Automation`、`Shortcut`、`InputSource` 分类记录关键运行事件。
+
+启动应用并查看自动保存的文件日志：
+
+`./script/build_and_run.sh --tail-file-log`
+
+启动应用并查看本应用的 telemetry：
+
+`./script/build_and_run.sh --telemetry`
+
+如果需要按进程查看更宽泛的运行日志，可执行：
+
+`./script/build_and_run.sh --logs`
 
 ## 发布到 GitHub
 

@@ -3,12 +3,14 @@ set -euo pipefail
 
 PRODUCT_NAME="DoubaoVoiceLauncher"
 BUNDLE_DISPLAY_NAME="豆包语音输入切换"
+BUNDLE_ID="com.local.doubao.voice-launcher"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$BUNDLE_DISPLAY_NAME.app"
 EXECUTABLE_PATH="$APP_BUNDLE/Contents/MacOS/$PRODUCT_NAME"
-BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
+BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-debug}"
 ZIP_PATH="$DIST_DIR/$PRODUCT_NAME.zip"
+FILE_LOG_PATH="$HOME/Library/Logs/DoubaoVoiceLauncher/DoubaoVoiceLauncher.log"
 
 cd "$ROOT_DIR"
 
@@ -28,7 +30,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key>
   <string>$PRODUCT_NAME</string>
   <key>CFBundleIdentifier</key>
-  <string>com.local.doubao.voice-launcher</string>
+  <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
   <string>$BUNDLE_DISPLAY_NAME</string>
   <key>CFBundleDisplayName</key>
@@ -53,9 +55,17 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-/usr/bin/codesign --force --deep --sign - --identifier "com.local.doubao.voice-launcher" "$APP_BUNDLE" >/dev/null
+/usr/bin/codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP_BUNDLE" >/dev/null
 /usr/bin/touch "$APP_BUNDLE"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" >/dev/null 2>&1 || true
+
+stream_logs() {
+  local predicate="$1"
+  /usr/bin/open -n "$APP_BUNDLE"
+  sleep 1
+  echo "Streaming logs with predicate: $predicate"
+  /usr/bin/log stream --style compact --info --debug --predicate "$predicate"
+}
 
 case "${1:-}" in
   --package)
@@ -69,6 +79,20 @@ case "${1:-}" in
     sleep 1
     pgrep -x "$PRODUCT_NAME" >/dev/null
     echo "$BUNDLE_DISPLAY_NAME is running"
+    ;;
+  --logs)
+    stream_logs "process == \"$PRODUCT_NAME\""
+    ;;
+  --telemetry)
+    stream_logs "subsystem == \"$BUNDLE_ID\""
+    ;;
+  --tail-file-log)
+    /usr/bin/open -n "$APP_BUNDLE"
+    sleep 1
+    mkdir -p "$(dirname "$FILE_LOG_PATH")"
+    touch "$FILE_LOG_PATH"
+    echo "Tailing file log: $FILE_LOG_PATH"
+    tail -f "$FILE_LOG_PATH"
     ;;
   --no-run)
     echo "Built $APP_BUNDLE"
