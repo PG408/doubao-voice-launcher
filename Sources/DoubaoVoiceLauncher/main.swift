@@ -2,9 +2,11 @@ import AppKit
 import ApplicationServices
 import Carbon
 import Foundation
+import OSLog
 
 private let doubaoInputSourceID = "com.bytedance.inputmethod.doubaoime.pinyin"
 private let appDisplayName = "豆包语音输入切换"
+private let appLogSubsystem = Bundle.main.bundleIdentifier ?? "com.local.doubao.voice-launcher"
 private let launcherWindowWidth: CGFloat = 510
 private let launcherWindowHeight: CGFloat = 480
 private let launcherContentWidth: CGFloat = 450
@@ -12,6 +14,44 @@ private let doubaoPreferenceDomains = [
     "com.bytedance.inputmethod.doubaoime",
     "com.bytedance.inputmethod.doubaoime.settings"
 ]
+
+private enum AppLog {
+    static let app = Logger(subsystem: appLogSubsystem, category: "App")
+    static let automation = Logger(subsystem: appLogSubsystem, category: "Automation")
+    static let inputSource = Logger(subsystem: appLogSubsystem, category: "InputSource")
+    static let permissions = Logger(subsystem: appLogSubsystem, category: "Permissions")
+    static let shortcut = Logger(subsystem: appLogSubsystem, category: "Shortcut")
+    static let ui = Logger(subsystem: appLogSubsystem, category: "UI")
+}
+
+private enum FileDebugLog {
+    static let directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/DoubaoVoiceLauncher", isDirectory: true)
+    static let fileURL = directoryURL.appendingPathComponent("DoubaoVoiceLauncher.log")
+    private static let queue = DispatchQueue(label: "com.local.doubao.voice-launcher.file-log")
+
+    static func record(level: String, category: String, message: String) {
+        queue.async {
+            do {
+                try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+                let timestamp = ISO8601DateFormatter().string(from: Date())
+                let line = "\(timestamp) [\(level)] [\(category)] \(message)\n"
+                guard let data = line.data(using: .utf8) else {
+                    return
+                }
+                if !FileManager.default.fileExists(atPath: fileURL.path) {
+                    FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+                }
+                let handle = try FileHandle(forWritingTo: fileURL)
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+                try handle.close()
+            } catch {
+                AppLog.app.error("Failed to write file debug log: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+}
 
 private struct Shortcut {
     let keyCode: CGKeyCode
@@ -48,6 +88,11 @@ private struct Shortcut {
         self.flags = flags
         self.display = display
     }
+
+    var logDescription: String {
+        let keyCodesDescription = keyCodes.map { String($0) }.joined(separator: ",")
+        return "\(display) [keyCodes=\(keyCodesDescription), flags=\(flags.rawValue)]"
+    }
 }
 
 private let defaultRightControlShortcut = Shortcut(
@@ -57,6 +102,7 @@ private let defaultRightControlShortcut = Shortcut(
 )
 private let rightControlLongPressThreshold: TimeInterval = 0.10
 private let rightControlDoubleTapWindow: TimeInterval = 0.45
+private let forwardedShortcutResumeDelay: TimeInterval = 0.20
 
 private enum ShortcutRole {
     case hold
@@ -120,6 +166,7 @@ private enum ShortcutDefaults {
         defaults.set(shortcut.keyCodes.map(Int.init), forKey: keyCodesKey)
         defaults.set(Int(shortcut.flags.rawValue), forKey: flagsKey)
         defaults.set(shortcut.display, forKey: displayKey)
+        AppLog.shortcut.info("Saved shortcut \(shortcut.logDescription, privacy: .public) for key \(displayKey, privacy: .public)")
     }
 }
 
@@ -262,19 +309,34 @@ private final class InputSourceService {
 
     func currentSourceID() -> String? {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else {
+            AppLog.inputSource.error("Failed to copy current keyboard input source")
+            FileDebugLog.record(level: "ERROR", category: "InputSource", message: "Failed to copy current keyboard input source")
             return nil
         }
-        return sourceID(for: source)
+        let currentID = sourceID(for: source)
+        if currentID == nil {
+            AppLog.inputSource.error("Current keyboard input source has no source ID")
+            FileDebugLog.record(level: "ERROR", category: "InputSource", message: "Current keyboard input source has no source ID")
+        }
+        return currentID
     }
 
     func beginDoubaoSession() -> Bool {
         if previousSourceID == nil {
             previousSourceID = currentSourceID()
+            AppLog.inputSource.info("Captured previous input source \(self.previousSourceID ?? "nil", privacy: .public)")
+            FileDebugLog.record(level: "INFO", category: "InputSource", message: "Captured previous input source \(previousSourceID ?? "nil")")
         }
-        if currentSourceID() == doubaoInputSourceID {
+        let currentID = currentSourceID()
+        if currentID == doubaoInputSourceID {
+            AppLog.inputSource.debug("Doubao input source is already active")
+            FileDebugLog.record(level: "DEBUG", category: "InputSource", message: "Doubao input source is already active")
             return true
         }
-        return selectSource(id: doubaoInputSourceID)
+        let ok = selectSource(id: doubaoInputSourceID)
+        AppLog.inputSource.info("Begin Doubao session from \(currentID ?? "nil", privacy: .public): \(ok, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "InputSource", message: "Begin Doubao session from \(currentID ?? "nil"): \(ok)")
+        return ok
     }
 
     func selectDoubao() -> Bool {
@@ -283,9 +345,13 @@ private final class InputSourceService {
 
     func restorePrevious() -> Bool {
         guard let previousSourceID else {
+            AppLog.inputSource.info("Skip restoring input source because no previous source was captured")
+            FileDebugLog.record(level: "INFO", category: "InputSource", message: "Skip restoring input source because no previous source was captured")
             return false
         }
         let ok = selectSource(id: previousSourceID)
+        AppLog.inputSource.info("Restore previous input source \(previousSourceID, privacy: .public): \(ok, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "InputSource", message: "Restore previous input source \(previousSourceID): \(ok)")
         if ok {
             self.previousSourceID = nil
         }
@@ -298,14 +364,23 @@ private final class InputSourceService {
 
     private func selectSource(id: String) -> Bool {
         guard let source = inputSource(id: id) else {
+            AppLog.inputSource.error("Input source not found: \(id, privacy: .public)")
+            FileDebugLog.record(level: "ERROR", category: "InputSource", message: "Input source not found: \(id)")
             return false
         }
-        return TISSelectInputSource(source) == noErr
+        let status = TISSelectInputSource(source)
+        if status != noErr {
+            AppLog.inputSource.error("Failed to select input source \(id, privacy: .public), status \(status, privacy: .public)")
+            FileDebugLog.record(level: "ERROR", category: "InputSource", message: "Failed to select input source \(id), status \(status)")
+        }
+        return status == noErr
     }
 
     private func inputSource(id: String) -> TISInputSource? {
         let properties = [kTISPropertyInputSourceID as String: id] as CFDictionary
         guard let list = TISCreateInputSourceList(properties, false)?.takeRetainedValue() as? [TISInputSource] else {
+            AppLog.inputSource.error("Failed to create input source list for \(id, privacy: .public)")
+            FileDebugLog.record(level: "ERROR", category: "InputSource", message: "Failed to create input source list for \(id)")
             return nil
         }
         return list.first
@@ -329,12 +404,14 @@ private enum PreferenceReader {
             }
             let display = stringValue("asrShortcutKeyDisplay", domain: domain)
                 ?? "keyCode=\(keyCode), flags=\(rawFlags)"
+            AppLog.shortcut.info("Loaded Doubao preference shortcut from \(domain, privacy: .public): \(display, privacy: .public)")
             return Shortcut(
                 keyCode: CGKeyCode(keyCode),
                 flags: CGEventFlags(rawValue: UInt64(rawFlags)),
                 display: display
             )
         }
+        AppLog.shortcut.info("No Doubao preference shortcut found")
         return nil
     }
 
@@ -361,15 +438,24 @@ private enum AccessibilityService {
         let options = [
             kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true
         ] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        let trusted = AXIsProcessTrustedWithOptions(options)
+        AppLog.permissions.info("Accessibility permission trusted: \(trusted, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Permissions", message: "Accessibility permission trusted: \(trusted)")
+        return trusted
     }
 
     static func canListenKeyboardEvents() -> Bool {
-        CGPreflightListenEventAccess()
+        let canListen = CGPreflightListenEventAccess()
+        AppLog.permissions.info("Input monitoring permission preflight: \(canListen, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Permissions", message: "Input monitoring permission preflight: \(canListen)")
+        return canListen
     }
 
     static func requestKeyboardEventAccess() -> Bool {
-        CGRequestListenEventAccess()
+        let granted = CGRequestListenEventAccess()
+        AppLog.permissions.info("Input monitoring permission request result: \(granted, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Permissions", message: "Input monitoring permission request result: \(granted)")
+        return granted
     }
 }
 
@@ -380,21 +466,15 @@ private enum ShortcutSender {
         event.getIntegerValueField(.eventSourceUserData) == syntheticEventMarker
     }
 
-    static func doubleTap(shortcut: Shortcut) {
-        tap(shortcut: shortcut)
-        usleep(130_000)
-        tap(shortcut: shortcut)
-    }
-
-    static func singleTap(shortcut: Shortcut) {
-        tap(shortcut: shortcut)
-    }
-
     static func keyDown(shortcut: Shortcut) {
+        AppLog.shortcut.info("Send shortcut key down \(shortcut.logDescription, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Shortcut", message: "Send shortcut key down \(shortcut.logDescription)")
         postModifierEvent(shortcut: shortcut, keyDown: true)
     }
 
     static func keyUp(shortcut: Shortcut) {
+        AppLog.shortcut.info("Send shortcut key up \(shortcut.logDescription, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Shortcut", message: "Send shortcut key up \(shortcut.logDescription)")
         postModifierEvent(shortcut: shortcut, keyDown: false)
     }
 
@@ -452,11 +532,6 @@ private enum ShortcutSender {
         }
     }
 
-    private static func tap(shortcut: Shortcut) {
-        postModifierEvent(shortcut: shortcut, keyDown: true)
-        usleep(60_000)
-        postModifierEvent(shortcut: shortcut, keyDown: false)
-    }
 }
 
 private final class RightControlAutomation {
@@ -472,7 +547,9 @@ private final class RightControlAutomation {
     private var longPressWorkItem: DispatchWorkItem?
     private var didTriggerLongPress = false
     private var resumeEventTapWorkItem: DispatchWorkItem?
+    private var isForwardingShortcut = false
     private var activeShortcut: Shortcut?
+    private var sessionShortcut: Shortcut?
     private var activeModifierKeyCodes = Set<CGKeyCode>()
     private var activeSupportsLongPress = false
     private var activeSupportsDoubleTap = false
@@ -484,17 +561,25 @@ private final class RightControlAutomation {
     }
 
     func start() -> Bool {
+        AppLog.automation.info("Start keyboard automation requested")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Start keyboard automation requested")
         guard eventTap == nil else {
+            AppLog.automation.info("Keyboard automation is already running")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard automation is already running")
             onStatus?("后台监听已开启。")
             return true
         }
 
         guard AccessibilityService.ensureTrusted() else {
+            AppLog.automation.error("Keyboard automation start failed because accessibility permission is missing")
+            FileDebugLog.record(level: "ERROR", category: "Automation", message: "Keyboard automation start failed because accessibility permission is missing")
             onStatus?("后台监听需要辅助功能权限。授权后请重启本 App。")
             return false
         }
 
         guard AccessibilityService.canListenKeyboardEvents() || AccessibilityService.requestKeyboardEventAccess() else {
+            AppLog.automation.error("Keyboard automation start failed because input monitoring permission is missing")
+            FileDebugLog.record(level: "ERROR", category: "Automation", message: "Keyboard automation start failed because input monitoring permission is missing")
             onStatus?("后台监听还需要输入监控权限。请在系统设置中打开本 App 的输入监控权限后重启。")
             return false
         }
@@ -518,6 +603,8 @@ private final class RightControlAutomation {
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
+            AppLog.automation.error("Failed to create global keyboard event tap")
+            FileDebugLog.record(level: "ERROR", category: "Automation", message: "Failed to create global keyboard event tap")
             onStatus?("无法创建全局键盘监听。请检查辅助功能权限。")
             return false
         }
@@ -528,6 +615,8 @@ private final class RightControlAutomation {
             CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         }
         CGEvent.tapEnable(tap: tap, enable: true)
+        AppLog.automation.info("Keyboard automation started with hold \(self.holdShortcut.logDescription, privacy: .public), doubleTap \(self.doubleTapShortcut.logDescription, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard automation started with hold \(holdShortcut.logDescription), doubleTap \(doubleTapShortcut.logDescription)")
         onStatus?("后台监听已开启：已选择的长按或免按快捷键会自动切到豆包，结束后恢复原输入法。")
         return true
     }
@@ -535,13 +624,23 @@ private final class RightControlAutomation {
     func updateShortcuts(hold: Shortcut, doubleTap: Shortcut) {
         holdShortcut = hold
         doubleTapShortcut = doubleTap
+        AppLog.automation.info("Updated automation shortcuts: hold \(hold.logDescription, privacy: .public), doubleTap \(doubleTap.logDescription, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Updated automation shortcuts: hold \(hold.logDescription), doubleTap \(doubleTap.logDescription)")
     }
 
     func stop() {
+        AppLog.automation.info("Stop keyboard automation requested")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Stop keyboard automation requested")
         resumeEventTapWorkItem?.cancel()
         resumeEventTapWorkItem = nil
         longPressWorkItem?.cancel()
         longPressWorkItem = nil
+        if sessionActive {
+            ShortcutSender.keyUp(shortcut: sessionShortcut ?? doubleTapShortcut)
+            sessionActive = false
+            sessionShortcut = nil
+        }
+        isForwardingShortcut = false
         isTriggerDown = false
         didTriggerLongPress = false
         activeModifierKeyCodes.removeAll()
@@ -554,10 +653,18 @@ private final class RightControlAutomation {
         }
         eventTap = nil
         runLoopSource = nil
+        AppLog.automation.info("Keyboard automation stopped")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard automation stopped")
     }
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if isForwardingShortcut {
+                AppLog.automation.debug("Event tap disabled while forwarding synthetic shortcut; waiting for scheduled re-enable")
+                return Unmanaged.passUnretained(event)
+            }
+            AppLog.automation.warning("Event tap disabled by system, re-enabling")
+            FileDebugLog.record(level: "WARN", category: "Automation", message: "Event tap disabled by system, re-enabling")
             if let eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
             }
@@ -613,9 +720,16 @@ private final class RightControlAutomation {
             return Unmanaged.passUnretained(event)
         }
 
+        AppLog.automation.info("Detected regular key down while no-hold session is active; scheduling restore")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Detected regular key down while no-hold session is active; scheduling restore")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            let shortcut = self.sessionShortcut ?? self.doubleTapShortcut
+            self.forwardShortcutEvent {
+                ShortcutSender.keyUp(shortcut: shortcut)
+            }
             _ = self.inputSourceService.restorePrevious()
             self.sessionActive = false
+            self.sessionShortcut = nil
             self.onStatus?("检测到按键结束语音输入，已恢复原输入法。")
         }
         return Unmanaged.passUnretained(event)
@@ -633,13 +747,18 @@ private final class RightControlAutomation {
         activeSupportsDoubleTap = supportsDoubleTap
         triggerDownAt = ProcessInfo.processInfo.systemUptime
         let pressStartedAt = triggerDownAt
+        AppLog.automation.info("Shortcut trigger down: \(shortcut.logDescription, privacy: .public), longPress=\(supportsLongPress, privacy: .public), doubleTap=\(supportsDoubleTap, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Shortcut trigger down: \(shortcut.logDescription), longPress=\(supportsLongPress), doubleTap=\(supportsDoubleTap)")
 
         if sessionActive {
+            AppLog.automation.info("Shortcut pressed while no-hold session is active")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Shortcut pressed while no-hold session is active")
             onStatus?("检测到快捷键按下，将结束免按语音输入。")
             return
         }
 
         guard supportsLongPress else {
+            AppLog.automation.debug("Trigger does not support long press; waiting for double-tap flow")
             return
         }
 
@@ -652,6 +771,8 @@ private final class RightControlAutomation {
                 return
             }
             guard self.inputSourceService.beginDoubaoSession() else {
+                AppLog.automation.error("Long press flow failed to switch to Doubao input source")
+                FileDebugLog.record(level: "ERROR", category: "Automation", message: "Long press flow failed to switch to Doubao input source")
                 self.onStatus?("切换到豆包输入法失败。")
                 return
             }
@@ -659,6 +780,8 @@ private final class RightControlAutomation {
             self.forwardShortcutEvent {
                 ShortcutSender.keyDown(shortcut: shortcut)
             }
+            AppLog.automation.info("Long press flow started after \(heldDuration, privacy: .public) seconds")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Long press flow started after \(heldDuration) seconds")
             self.onStatus?("检测到长按模式快捷键，已切到豆包并开始语音输入。")
         }
         longPressWorkItem = workItem
@@ -672,6 +795,8 @@ private final class RightControlAutomation {
         longPressWorkItem = nil
         let shortcut = activeShortcut ?? doubleTapShortcut
         let supportsDoubleTap = activeSupportsDoubleTap
+        AppLog.automation.info("Shortcut trigger up: \(shortcut.logDescription, privacy: .public), didLongPress=\(self.didTriggerLongPress, privacy: .public), sessionActive=\(self.sessionActive, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Shortcut trigger up: \(shortcut.logDescription), didLongPress=\(didTriggerLongPress), sessionActive=\(sessionActive)")
 
         if didTriggerLongPress {
             forwardShortcutEvent {
@@ -680,20 +805,28 @@ private final class RightControlAutomation {
             didTriggerLongPress = false
             sessionActive = false
             resetActiveTrigger()
+            AppLog.automation.info("Long press flow ended; restoring previous input source")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Long press flow ended; restoring previous input source")
             restoreAfterDelay(message: "长按模式结束，已恢复原输入法。", delay: 0.45)
             return
         }
 
         if sessionActive {
             guard inputSourceService.beginDoubaoSession() else {
+                AppLog.automation.error("No-hold stop flow failed to switch to Doubao input source")
+                FileDebugLog.record(level: "ERROR", category: "Automation", message: "No-hold stop flow failed to switch to Doubao input source")
                 onStatus?("切换到豆包输入法失败。")
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                let endingShortcut = self.sessionShortcut ?? shortcut
                 self.forwardShortcutEvent {
-                    ShortcutSender.singleTap(shortcut: shortcut)
+                    ShortcutSender.keyUp(shortcut: endingShortcut)
                 }
                 self.sessionActive = false
+                self.sessionShortcut = nil
+                AppLog.automation.info("No-hold flow stopped by shortcut; restoring previous input source")
+                FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold flow stopped by shortcut; restoring previous input source")
                 self.restoreAfterDelay(message: "检测到快捷键单击结束免按语音输入，已恢复原输入法。", delay: 0.45)
             }
             lastShortTapUpAt = 0
@@ -702,20 +835,30 @@ private final class RightControlAutomation {
         }
 
         guard supportsDoubleTap else {
+            AppLog.automation.debug("Trigger up ignored because active shortcut does not support double-tap flow")
             resetActiveTrigger()
             return
         }
 
         if now - lastShortTapUpAt <= rightControlDoubleTapWindow {
             guard inputSourceService.beginDoubaoSession() else {
+                AppLog.automation.error("Double-tap flow failed to switch to Doubao input source")
+                FileDebugLog.record(level: "ERROR", category: "Automation", message: "Double-tap flow failed to switch to Doubao input source")
                 onStatus?("切换到豆包输入法失败。")
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 self.forwardShortcutEvent {
-                    ShortcutSender.doubleTap(shortcut: shortcut)
+                    ShortcutSender.keyDown(shortcut: shortcut)
                 }
                 self.sessionActive = true
+                self.sessionShortcut = shortcut
+                AppLog.automation.info("No-hold flow started by double tap with forwarded key down")
+                FileDebugLog.record(
+                    level: "INFO",
+                    category: "Automation",
+                    message: "No-hold flow started by double tap with forwarded key down"
+                )
                 self.onStatus?("检测到免按模式快捷键双击，已切到豆包并转发语音快捷键。")
             }
             lastShortTapUpAt = 0
@@ -725,11 +868,15 @@ private final class RightControlAutomation {
 
         lastShortTapUpAt = now
         resetActiveTrigger()
+        AppLog.automation.info("First double-tap candidate recorded")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "First double-tap candidate recorded")
         onStatus?("检测到一次免按模式快捷键，等待第二次按下。")
     }
 
-    private func forwardShortcutEvent(_ send: () -> Void) {
+    private func forwardShortcutEvent(resumeDelay: TimeInterval = forwardedShortcutResumeDelay, _ send: () -> Void) {
         if let eventTap {
+            AppLog.automation.debug("Temporarily disabling event tap before forwarding shortcut")
+            isForwardingShortcut = true
             CGEvent.tapEnable(tap: eventTap, enable: false)
         }
 
@@ -741,14 +888,18 @@ private final class RightControlAutomation {
                 return
             }
             CGEvent.tapEnable(tap: eventTap, enable: true)
+            self.isForwardingShortcut = false
+            AppLog.automation.debug("Re-enabled event tap after forwarding shortcut")
         }
         resumeEventTapWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + resumeDelay, execute: workItem)
     }
 
     private func restoreAfterDelay(message: String, delay: TimeInterval) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            _ = self.inputSourceService.restorePrevious()
+            let restored = self.inputSourceService.restorePrevious()
+            AppLog.automation.info("Restore after delay finished: \(restored, privacy: .public)")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Restore after delay finished: \(restored)")
             self.onStatus?(message)
         }
     }
@@ -787,6 +938,8 @@ private final class LauncherViewController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        AppLog.ui.info("Launcher view did load")
+        FileDebugLog.record(level: "INFO", category: "UI", message: "Launcher view did load; file log path: \(FileDebugLog.fileURL.path)")
         buildUI()
         automation.onStatus = { [weak self] message in
             self?.refreshStatus(message)
@@ -795,6 +948,8 @@ private final class LauncherViewController: NSViewController {
         let started = automation.start()
         isMonitoring = started
         updateMonitorToggleButton()
+        AppLog.ui.info("Initial automation start result: \(started, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "UI", message: "Initial automation start result: \(started)")
         if started {
             refreshStatus("后台监听已开启。")
         }
@@ -1084,6 +1239,8 @@ private final class LauncherViewController: NSViewController {
     private func refreshStatus(_ message: String? = nil) {
         if let message {
             statusMessage = message
+            AppLog.ui.info("Status message updated: \(message, privacy: .public)")
+            FileDebugLog.record(level: "INFO", category: "UI", message: "Status message updated: \(message)")
         }
 
         let installed = inputSourceService.isDoubaoInstalled() ? "已安装" : "未安装"
@@ -1121,6 +1278,8 @@ private final class LauncherViewController: NSViewController {
 
     @objc private func toggleMonitoring() {
         if isMonitoring {
+            AppLog.ui.info("User paused keyboard automation from launcher UI")
+            FileDebugLog.record(level: "INFO", category: "UI", message: "User paused keyboard automation from launcher UI")
             automation.stop()
             isMonitoring = false
             updateMonitorToggleButton()
@@ -1128,6 +1287,8 @@ private final class LauncherViewController: NSViewController {
             return
         }
 
+        AppLog.ui.info("User started keyboard automation from launcher UI")
+        FileDebugLog.record(level: "INFO", category: "UI", message: "User started keyboard automation from launcher UI")
         let started = automation.start()
         isMonitoring = started
         updateMonitorToggleButton()
@@ -1154,6 +1315,8 @@ private final class LauncherViewController: NSViewController {
             currentShortcut = doubleTapShortcut
             title = "选择免按模式快捷键"
         }
+        AppLog.ui.info("Open shortcut picker for role \(String(describing: role), privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "UI", message: "Open shortcut picker for role \(String(describing: role))")
 
         let popover = NSPopover()
         let controller = ShortcutPickerViewController(title: title, currentShortcut: currentShortcut)
@@ -1166,10 +1329,14 @@ private final class LauncherViewController: NSViewController {
             case .hold:
                 self.holdShortcut = shortcut
                 ShortcutDefaults.saveHoldShortcut(shortcut)
+                AppLog.ui.info("Applied hold shortcut \(shortcut.logDescription, privacy: .public)")
+                FileDebugLog.record(level: "INFO", category: "UI", message: "Applied hold shortcut \(shortcut.logDescription)")
                 self.refreshStatus("已设置长按模式快捷键：\(shortcut.display)。")
             case .doubleTap:
                 self.doubleTapShortcut = shortcut
                 ShortcutDefaults.saveDoubleTapShortcut(shortcut)
+                AppLog.ui.info("Applied double-tap shortcut \(shortcut.logDescription, privacy: .public)")
+                FileDebugLog.record(level: "INFO", category: "UI", message: "Applied double-tap shortcut \(shortcut.logDescription)")
                 self.refreshStatus("已设置免按模式快捷键：\(shortcut.display)。")
             }
             self.automation.updateShortcuts(hold: self.holdShortcut, doubleTap: self.doubleTapShortcut)
@@ -1193,27 +1360,39 @@ private final class LauncherViewController: NSViewController {
         ]
         for path in paths where FileManager.default.fileExists(atPath: path) {
             NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            AppLog.ui.info("Opened Doubao settings at \(path, privacy: .public)")
+            FileDebugLog.record(level: "INFO", category: "UI", message: "Opened Doubao settings at \(path)")
             refreshStatus("已尝试打开豆包设置。")
             return
         }
+        AppLog.ui.error("Doubao settings app was not found")
+        FileDebugLog.record(level: "ERROR", category: "UI", message: "Doubao settings app was not found")
         refreshStatus("未找到豆包设置页。")
     }
 
     @objc private func openAccessibilitySettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else {
+            AppLog.ui.error("Failed to build accessibility settings URL")
+            FileDebugLog.record(level: "ERROR", category: "UI", message: "Failed to build accessibility settings URL")
             refreshStatus("无法打开辅助功能设置。")
             return
         }
         NSWorkspace.shared.open(url)
+        AppLog.ui.info("Opened accessibility settings")
+        FileDebugLog.record(level: "INFO", category: "UI", message: "Opened accessibility settings")
         refreshStatus("请在辅助功能列表中打开 \(appDisplayName)；若已存在但无效，先移除再重新添加。")
     }
 
     @objc private func openInputMonitoringSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") else {
+            AppLog.ui.error("Failed to build input monitoring settings URL")
+            FileDebugLog.record(level: "ERROR", category: "UI", message: "Failed to build input monitoring settings URL")
             refreshStatus("无法打开输入监控设置。")
             return
         }
         NSWorkspace.shared.open(url)
+        AppLog.ui.info("Opened input monitoring settings")
+        FileDebugLog.record(level: "INFO", category: "UI", message: "Opened input monitoring settings")
         refreshStatus("请在输入监控列表中打开 \(appDisplayName)；若列表中没有，请用加号添加当前 app。")
     }
 }
@@ -1614,6 +1793,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppLog.app.info("Application did finish launching")
+        FileDebugLog.record(level: "INFO", category: "App", message: "Application did finish launching")
         NSApp.setActivationPolicy(.regular)
         let controller = LauncherViewController()
         let window = NSWindow(
@@ -1630,6 +1811,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
+        AppLog.app.info("Main window is visible")
+        FileDebugLog.record(level: "INFO", category: "App", message: "Main window is visible")
     }
 
     private func installCenteredTitle(in window: NSWindow) {
