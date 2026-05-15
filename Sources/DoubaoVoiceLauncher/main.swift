@@ -847,7 +847,7 @@ private final class RightControlAutomation {
                 onStatus?("切换到豆包输入法失败。")
                 return
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
                 self.forwardShortcutEvent {
                     ShortcutSender.keyDown(shortcut: shortcut)
                 }
