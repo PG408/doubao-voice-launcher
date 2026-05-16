@@ -7,9 +7,13 @@ import OSLog
 private let doubaoInputSourceID = "com.bytedance.inputmethod.doubaoime.pinyin"
 private let appDisplayName = "豆包语音输入切换"
 private let appLogSubsystem = Bundle.main.bundleIdentifier ?? "com.local.doubao.voice-launcher"
-private let launcherWindowWidth: CGFloat = 510
-private let launcherWindowHeight: CGFloat = 655
+private let launcherWindowWidth: CGFloat = 480
+private let launcherWindowHeight: CGFloat = 538
 private let launcherContentWidth: CGFloat = 450
+private let designBorderColor = NSColor.black.withAlphaComponent(0.09)
+private let designDividerColor = NSColor.black.withAlphaComponent(0.09)
+private let designCardFillColor = NSColor.white.withAlphaComponent(0.64)
+private let designSecondaryTextColor = NSColor(calibratedRed: 0.42, green: 0.44, blue: 0.47, alpha: 1.0)
 private let doubaoPreferenceDomains = [
     "com.bytedance.inputmethod.doubaoime",
     "com.bytedance.inputmethod.doubaoime.settings"
@@ -1114,6 +1118,189 @@ private final class EditingDismissView: NSView {
     }
 }
 
+private enum SettingsIconKind {
+    case forwardDelay
+    case singleTap
+    case doubleTap
+    case longPress
+
+    var assetName: String {
+        switch self {
+        case .forwardDelay:
+            return "icon-forward-delay"
+        case .singleTap:
+            return "icon-single-tap"
+        case .doubleTap:
+            return "icon-double-tap"
+        case .longPress:
+            return "icon-long-press"
+        }
+    }
+}
+
+private enum StatusIconKind {
+    case wave
+    case check
+    case keyboard
+}
+
+private enum IconAssetLoader {
+    static func image(named name: String) -> NSImage? {
+        for fileExtension in ["pdf", "svg", "png"] {
+            guard let assetURL = Bundle.main.url(forResource: name, withExtension: fileExtension),
+                  let image = NSImage(contentsOf: assetURL) else {
+                continue
+            }
+            return image
+        }
+        return nil
+    }
+
+    static func draw(_ image: NSImage, in rect: NSRect, fraction: CGFloat = 1.0, flippedVertically: Bool = false) {
+        guard flippedVertically else {
+            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: fraction)
+            return
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        let transform = NSAffineTransform()
+        transform.translateX(by: 0, yBy: rect.minY + rect.maxY)
+        transform.scaleX(by: 1, yBy: -1)
+        transform.concat()
+        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: fraction)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+private final class CenteredTextFieldCell: NSTextFieldCell {
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        var drawingRect = super.drawingRect(forBounds: rect)
+        let textSize = cellSize(forBounds: rect)
+        drawingRect.origin.y = rect.origin.y + floor((rect.height - textSize.height) / 2) + 0.5
+        drawingRect.size.height = textSize.height
+        return drawingRect
+    }
+
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: drawingRect(forBounds: rect), in: controlView, editor: textObj, delegate: delegate, event: event)
+    }
+
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, start selStart: Int, length selLength: Int) {
+        super.select(withFrame: drawingRect(forBounds: rect), in: controlView, editor: textObj, delegate: delegate, start: selStart, length: selLength)
+    }
+}
+
+private final class TrafficLightStripView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let colors = [
+            NSColor(calibratedRed: 1.0, green: 0.372, blue: 0.341, alpha: 1.0),
+            NSColor(calibratedRed: 0.996, green: 0.737, blue: 0.180, alpha: 1.0),
+            NSColor(calibratedRed: 0.157, green: 0.784, blue: 0.251, alpha: 1.0)
+        ]
+        for (index, color) in colors.enumerated() {
+            color.setFill()
+            let rect = NSRect(x: CGFloat(index) * 20, y: 0, width: 12, height: 12)
+            NSBezierPath(ovalIn: rect).fill()
+        }
+    }
+}
+
+private final class StatusIconView: NSView {
+    private let kind: StatusIconKind
+    var waveAssetName = "icon-status-wave-paused" {
+        didSet {
+            needsDisplay = true
+        }
+    }
+    var waveColor = NSColor.systemRed {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    init(kind: StatusIconKind) {
+        self.kind = kind
+        super.init(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let color: NSColor = kind == .wave ? waveColor : .systemBlue
+        color.setStroke()
+        color.setFill()
+        switch kind {
+        case .wave:
+            if let image = IconAssetLoader.image(named: waveAssetName) {
+                IconAssetLoader.draw(image, in: bounds)
+                return
+            }
+            drawWave()
+        case .check:
+            drawCheck()
+        case .keyboard:
+            drawKeyboard()
+        }
+    }
+
+    private func drawWave() {
+        let path = NSBezierPath()
+        path.lineWidth = 1.8
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        path.move(to: NSPoint(x: 3.0, y: 10.0))
+        path.curve(to: NSPoint(x: 7.0, y: 10.0), controlPoint1: NSPoint(x: 4.3, y: 10.0), controlPoint2: NSPoint(x: 5.0, y: 5.5))
+        path.curve(to: NSPoint(x: 10.0, y: 10.0), controlPoint1: NSPoint(x: 8.3, y: 13.0), controlPoint2: NSPoint(x: 8.7, y: 13.0))
+        path.curve(to: NSPoint(x: 13.0, y: 10.0), controlPoint1: NSPoint(x: 11.3, y: 7.0), controlPoint2: NSPoint(x: 11.7, y: 7.0))
+        path.curve(to: NSPoint(x: 17.0, y: 10.0), controlPoint1: NSPoint(x: 15.0, y: 14.5), controlPoint2: NSPoint(x: 15.7, y: 10.0))
+        path.stroke()
+    }
+
+    private func drawCheck() {
+        let circle = NSBezierPath(ovalIn: bounds.insetBy(dx: 2.5, dy: 2.5))
+        circle.lineWidth = 1.8
+        circle.stroke()
+
+        let mark = NSBezierPath()
+        mark.lineWidth = 1.8
+        mark.lineCapStyle = .round
+        mark.lineJoinStyle = .round
+        mark.move(to: NSPoint(x: 6.4, y: 10.1))
+        mark.line(to: NSPoint(x: 8.7, y: 7.8))
+        mark.line(to: NSPoint(x: 13.4, y: 12.4))
+        mark.stroke()
+    }
+
+    private func drawKeyboard() {
+        let body = NSBezierPath(roundedRect: bounds.insetBy(dx: 2.2, dy: 5.1), xRadius: 2.0, yRadius: 2.0)
+        body.lineWidth = 1.6
+        body.stroke()
+
+        let keyW: CGFloat = 2.0
+        let keyH: CGFloat = 1.6
+        for x in [5.0, 8.0, 11.0, 14.0] {
+            NSBezierPath(roundedRect: NSRect(x: x, y: 10.3, width: keyW, height: keyH), xRadius: 0.5, yRadius: 0.5).fill()
+        }
+        NSBezierPath(roundedRect: NSRect(x: 5.0, y: 7.5, width: 8.0, height: 1.6), xRadius: 0.8, yRadius: 0.8).fill()
+        NSBezierPath(roundedRect: NSRect(x: 13.7, y: 7.5, width: 1.8, height: 1.6), xRadius: 0.5, yRadius: 0.5).fill()
+    }
+}
+
 private final class LauncherViewController: NSViewController, NSTextFieldDelegate {
     private enum TimingControlTag {
         static let forwardDelay = 1
@@ -1136,6 +1323,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
 
     private let messageLabel = NSTextField(labelWithString: "")
     private let monitorStatusValueLabel = NSTextField(labelWithString: "")
+    private let monitorStatusIconView = StatusIconView(kind: .wave)
     private let doubaoStatusValueLabel = NSTextField(labelWithString: "")
     private let currentInputValueLabel = NSTextField(labelWithString: "")
     private let holdShortcutButton = ShortcutSelectButton(title: "")
@@ -1153,7 +1341,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     override func loadView() {
         let root = EditingDismissView(frame: NSRect(x: 0, y: 0, width: launcherWindowWidth, height: launcherWindowHeight))
         root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        root.layer?.backgroundColor = NSColor(calibratedRed: 0.962, green: 0.962, blue: 0.969, alpha: 1.0).cgColor
         view = root
     }
 
@@ -1184,35 +1372,34 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     }
 
     private func buildUI() {
-        let titleLabel = NSTextField(labelWithString: appDisplayName)
-        titleLabel.font = .systemFont(ofSize: 25, weight: .semibold)
+        let chromeBar = makeChromeBar()
 
-        let explanationLabel = NSTextField(labelWithString: "自动切换到豆包语音输入，结束后恢复原输入法")
-        explanationLabel.font = .systemFont(ofSize: 15)
-        explanationLabel.textColor = .secondaryLabelColor
+        let titleLabel = NSTextField(labelWithString: "豆包语音输入快速切换")
+        titleLabel.font = .systemFont(ofSize: 24, weight: .semibold)
+
+        let explanationLabel = NSTextField(labelWithString: "点击快捷键自动切换到豆包语音输入，输入结束后自动恢复原输入法")
+        explanationLabel.font = .systemFont(ofSize: 14)
+        explanationLabel.textColor = NSColor(calibratedRed: 0.39, green: 0.40, blue: 0.43, alpha: 0.90)
         explanationLabel.lineBreakMode = .byWordWrapping
 
         messageLabel.font = .systemFont(ofSize: 13)
-        messageLabel.textColor = .secondaryLabelColor
+        messageLabel.textColor = designSecondaryTextColor
         messageLabel.lineBreakMode = .byWordWrapping
         messageLabel.stringValue = "正在检查状态..."
 
         holdShortcutButton.target = self
         holdShortcutButton.action = #selector(showHoldShortcutPicker(_:))
-        holdShortcutButton.widthAnchor.constraint(equalToConstant: 84).isActive = true
 
         doubleTapShortcutButton.target = self
         doubleTapShortcutButton.action = #selector(showDoubleTapShortcutPicker(_:))
-        doubleTapShortcutButton.widthAnchor.constraint(equalToConstant: 84).isActive = true
 
         singleTapShortcutButton.target = self
         singleTapShortcutButton.action = #selector(showSingleTapShortcutPicker(_:))
-        singleTapShortcutButton.widthAnchor.constraint(equalToConstant: 84).isActive = true
         updateShortcutButtons()
 
         configureTimingControls()
 
-        let openSettingsButton = IconActionButton(title: "打开豆包设置", symbolName: "gearshape")
+        let openSettingsButton = IconActionButton(title: "豆包设置", symbolName: "slider.horizontal.3")
         openSettingsButton.target = self
         openSettingsButton.action = #selector(openDoubaoSettings)
 
@@ -1220,7 +1407,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         accessibilityButton.target = self
         accessibilityButton.action = #selector(openAccessibilitySettings)
 
-        let inputMonitoringButton = IconActionButton(title: "输入监控", symbolName: "keyboard")
+        let inputMonitoringButton = IconActionButton(title: "输入监控", symbolName: "keyboard-clear")
         inputMonitoringButton.target = self
         inputMonitoringButton.action = #selector(openInputMonitoringSettings)
 
@@ -1233,78 +1420,90 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         configureShortcutButton(doubleTapShortcutButton)
         configureShortcutButton(singleTapShortcutButton)
 
-        let statusContent = NSStackView(views: [
-            makeStatusItem(symbolName: "waveform", valueLabel: monitorStatusValueLabel, caption: "运行状态", showsDot: true),
-            makeVerticalDivider(),
-            makeStatusItem(symbolName: "checkmark.circle", valueLabel: doubaoStatusValueLabel, caption: "豆包输入法", showsDot: false),
-            makeVerticalDivider(),
-            makeStatusItem(symbolName: "keyboard", valueLabel: currentInputValueLabel, caption: "当前输入源", showsDot: false)
-        ])
-        statusContent.orientation = .horizontal
-        statusContent.spacing = 0
-        statusContent.alignment = .centerY
-        statusContent.distribution = .fill
-        let statusCard = makeRoundedContainer(content: statusContent, horizontalPadding: 18, verticalPadding: 15)
+        let statusContent = makeStatusContent()
+        let statusCard = makeRoundedContainer(content: statusContent, horizontalPadding: 11, verticalPadding: 6)
+        statusCard.heightAnchor.constraint(equalToConstant: 66).isActive = true
 
-        let globalTimingSectionTitle = NSTextField(labelWithString: "全局时间间隔")
-        globalTimingSectionTitle.font = .systemFont(ofSize: 15, weight: .semibold)
+        let settingsSectionTitle = NSTextField(labelWithString: "设置")
+        settingsSectionTitle.font = .systemFont(ofSize: 16, weight: .semibold)
         let globalTimingCard = makeRoundedContainer(
             content: makeGlobalTimingRow(),
-            horizontalPadding: 18,
-            verticalPadding: 12
+            horizontalPadding: 11,
+            verticalPadding: 1
         )
+        globalTimingCard.heightAnchor.constraint(equalToConstant: 41).isActive = true
 
         let shortcutContent = NSStackView(views: [
             makeShortcutRow(
-                title: "长按模式",
-                detail: "按住说话，松手结束",
-                timingView: makeTimingControl(title: "长按触发时长", textField: longPressTextField, stepper: longPressStepper),
-                button: holdShortcutButton
-            ),
-            makeHorizontalDivider(),
-            makeShortcutRow(
-                title: "双击模式",
-                detail: "双击开始，再次按键结束",
-                timingView: makeTimingControl(title: "双击最短间隔", textField: doubleTapTextField, stepper: doubleTapStepper),
-                button: doubleTapShortcutButton
-            ),
-            makeHorizontalDivider(),
-            makeShortcutRow(
+                iconKind: .singleTap,
                 title: "单击模式",
-                detail: "单击开始，再次单击结束",
-                timingView: makeEmptyTimingPlaceholder(),
-                button: singleTapShortcutButton
+                prefix: "单击",
+                button: singleTapShortcutButton,
+                suffix: "开始，再按结束",
+                timingView: nil
+            ),
+            makeHorizontalDivider(),
+            makeShortcutRow(
+                iconKind: .doubleTap,
+                title: "双击模式",
+                prefix: "双击",
+                button: doubleTapShortcutButton,
+                suffix: "开始，再按结束，双击间隔",
+                timingView: makeTimingControl(title: "双击最短间隔", textField: doubleTapTextField, stepper: doubleTapStepper),
+                timingWidth: 78
+            ),
+            makeHorizontalDivider(),
+            makeShortcutRow(
+                iconKind: .longPress,
+                title: "长按模式",
+                prefix: "长按",
+                button: holdShortcutButton,
+                suffix: "开始，再按结束，长按时长",
+                timingView: makeTimingControl(title: "长按触发时长", textField: longPressTextField, stepper: longPressStepper),
+                timingWidth: 78
             )
         ])
         shortcutContent.orientation = .vertical
-        shortcutContent.spacing = 0
+        shortcutContent.spacing = 4
         shortcutContent.alignment = .leading
-        let shortcutSectionTitle = NSTextField(labelWithString: "快捷键")
-        shortcutSectionTitle.font = .systemFont(ofSize: 15, weight: .semibold)
-        let shortcutCard = makeRoundedContainer(content: shortcutContent, horizontalPadding: 14, verticalPadding: 14)
+        let shortcutCard = makeRoundedContainer(content: shortcutContent, horizontalPadding: 10, verticalPadding: 5)
+        shortcutCard.heightAnchor.constraint(equalToConstant: 133).isActive = true
 
         let secondaryButtonRow = makeBottomActionBar(buttons: [openSettingsButton, accessibilityButton, inputMonitoringButton])
 
-        let stack = NSStackView(views: [titleLabel, explanationLabel, statusCard, monitorToggleButton, globalTimingSectionTitle, globalTimingCard, shortcutSectionTitle, shortcutCard])
+        let headerStack = NSStackView(views: [titleLabel, explanationLabel])
+        headerStack.orientation = .vertical
+        headerStack.spacing = 7
+        headerStack.alignment = .leading
+
+        let stack = NSStackView(views: [headerStack, statusCard, monitorToggleButton, settingsSectionTitle, globalTimingCard, shortcutCard])
         stack.orientation = .vertical
-        stack.spacing = 13
+        stack.spacing = 0
         stack.alignment = .leading
         stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.setCustomSpacing(18, after: headerStack)
+        stack.setCustomSpacing(15, after: statusCard)
+        stack.setCustomSpacing(24, after: monitorToggleButton)
+        stack.setCustomSpacing(8, after: settingsSectionTitle)
+        stack.setCustomSpacing(7, after: globalTimingCard)
 
+        view.addSubview(chromeBar)
         view.addSubview(stack)
         view.addSubview(secondaryButtonRow)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 30),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -30),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 30),
-            titleLabel.widthAnchor.constraint(equalToConstant: launcherContentWidth),
-            explanationLabel.widthAnchor.constraint(equalToConstant: launcherContentWidth),
+            chromeBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 2),
+            chromeBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -2),
+            chromeBar.topAnchor.constraint(equalTo: view.topAnchor, constant: 1),
+            chromeBar.heightAnchor.constraint(equalToConstant: 29),
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 15),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -15),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 59),
+            headerStack.widthAnchor.constraint(equalToConstant: launcherContentWidth),
             statusCard.widthAnchor.constraint(equalToConstant: launcherContentWidth),
             monitorToggleButton.widthAnchor.constraint(equalToConstant: launcherContentWidth),
-            monitorToggleButton.heightAnchor.constraint(equalToConstant: 37),
-            globalTimingSectionTitle.widthAnchor.constraint(equalToConstant: launcherContentWidth),
+            monitorToggleButton.heightAnchor.constraint(equalToConstant: 36.5),
+            settingsSectionTitle.widthAnchor.constraint(equalToConstant: launcherContentWidth),
             globalTimingCard.widthAnchor.constraint(equalToConstant: launcherContentWidth),
-            shortcutSectionTitle.widthAnchor.constraint(equalToConstant: launcherContentWidth),
             shortcutCard.widthAnchor.constraint(equalToConstant: launcherContentWidth),
             secondaryButtonRow.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             secondaryButtonRow.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -1313,15 +1512,56 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         ])
     }
 
+    private func makeChromeBar() -> NSView {
+        let titleLabel = NSTextField(labelWithString: appDisplayName)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = NSColor.labelColor.withAlphaComponent(0.86)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let trafficLights = TrafficLightStripView()
+        trafficLights.translatesAutoresizingMaskIntoConstraints = false
+
+        let bar = EditingDismissView()
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.wantsLayer = true
+        bar.layer?.backgroundColor = NSColor(calibratedRed: 0.98, green: 0.98, blue: 0.984, alpha: 0.92).cgColor
+
+        let bottomLine = EditingDismissView()
+        bottomLine.translatesAutoresizingMaskIntoConstraints = false
+        bottomLine.wantsLayer = true
+        bottomLine.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.08).cgColor
+
+        bar.addSubview(trafficLights)
+        bar.addSubview(titleLabel)
+        bar.addSubview(bottomLine)
+        NSLayoutConstraint.activate([
+            trafficLights.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 14),
+            trafficLights.centerYAnchor.constraint(equalTo: bar.centerYAnchor, constant: 1),
+            trafficLights.widthAnchor.constraint(equalToConstant: 52),
+            trafficLights.heightAnchor.constraint(equalToConstant: 12),
+            titleLabel.centerXAnchor.constraint(equalTo: bar.centerXAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor, constant: 1),
+            bottomLine.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            bottomLine.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            bottomLine.bottomAnchor.constraint(equalTo: bar.bottomAnchor),
+            bottomLine.heightAnchor.constraint(equalToConstant: 1)
+        ])
+        return bar
+    }
+
     private func makeRoundedContainer(content: NSView, horizontalPadding: CGFloat, verticalPadding: CGFloat) -> NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
 
         let card = EditingDismissView()
         card.wantsLayer = true
-        card.layer?.cornerRadius = 14
+        card.layer?.cornerRadius = 12
         card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.26).cgColor
-        card.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.18).cgColor
+        card.layer?.borderColor = designBorderColor.cgColor
+        card.layer?.backgroundColor = designCardFillColor.cgColor
+        card.layer?.shadowColor = NSColor.black.cgColor
+        card.layer?.shadowOpacity = 0.04
+        card.layer?.shadowRadius = 20
+        card.layer?.shadowOffset = CGSize(width: 0, height: -10)
         card.addSubview(content)
 
         NSLayoutConstraint.activate([
@@ -1333,32 +1573,85 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         return card
     }
 
-    private func makeStatusItem(symbolName: String, valueLabel: NSTextField, caption: String, showsDot: Bool) -> NSView {
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
-        icon.contentTintColor = .systemBlue
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 24, weight: .medium)
-        icon.widthAnchor.constraint(equalToConstant: 30).isActive = true
+    private func makeStatusContent() -> NSView {
+        let runningItem = makeStatusItem(
+            icon: monitorStatusIconView,
+            valueLabel: monitorStatusValueLabel,
+            caption: "运行状态",
+            showsDot: false,
+            iconLeading: 23.5,
+            textLeading: 48.5
+        )
+        let installedItem = makeStatusItem(
+            icon: StatusIconView(kind: .check),
+            valueLabel: doubaoStatusValueLabel,
+            caption: "豆包输入法",
+            showsDot: false,
+            iconLeading: 17.5,
+            textLeading: 42.5
+        )
+        let inputItem = makeStatusItem(
+            icon: StatusIconView(kind: .keyboard),
+            valueLabel: currentInputValueLabel,
+            caption: "当前输入源",
+            showsDot: false,
+            iconLeading: 5,
+            textLeading: 30
+        )
+        let firstDivider = makeVerticalDivider()
+        let secondDivider = makeVerticalDivider()
+        let content = EditingDismissView()
+        [runningItem, firstDivider, installedItem, secondDivider, inputItem].forEach {
+            content.addSubview($0)
+            $0.translatesAutoresizingMaskIntoConstraints = false
+        }
+        content.widthAnchor.constraint(equalToConstant: 428).isActive = true
+        content.heightAnchor.constraint(equalToConstant: 54).isActive = true
+        NSLayoutConstraint.activate([
+            runningItem.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            runningItem.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            firstDivider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 136.5),
+            firstDivider.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            installedItem.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 154),
+            installedItem.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            secondDivider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 290.5),
+            secondDivider.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            inputItem.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 308),
+            inputItem.centerYAnchor.constraint(equalTo: content.centerYAnchor)
+        ])
+        return content
+    }
 
-        valueLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+    private func makeStatusItem(
+        icon: StatusIconView,
+        valueLabel: NSTextField,
+        caption: String,
+        showsDot: Bool,
+        iconLeading: CGFloat,
+        textLeading: CGFloat
+    ) -> NSView {
+        icon.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 20).isActive = true
+
+        valueLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         valueLabel.textColor = .labelColor
         valueLabel.lineBreakMode = .byTruncatingMiddle
 
         let valueRow = NSStackView(views: [valueLabel])
         valueRow.orientation = .horizontal
-        valueRow.spacing = 8
+        valueRow.spacing = 5
         if showsDot {
             monitorStatusDotView.wantsLayer = true
-            monitorStatusDotView.layer?.cornerRadius = 4
+            monitorStatusDotView.layer?.cornerRadius = 3
             monitorStatusDotView.layer?.backgroundColor = NSColor.systemRed.cgColor
-            monitorStatusDotView.widthAnchor.constraint(equalToConstant: 8).isActive = true
-            monitorStatusDotView.heightAnchor.constraint(equalToConstant: 8).isActive = true
+            monitorStatusDotView.widthAnchor.constraint(equalToConstant: 6).isActive = true
+            monitorStatusDotView.heightAnchor.constraint(equalToConstant: 6).isActive = true
             valueRow.addArrangedSubview(monitorStatusDotView)
         }
 
         let captionLabel = NSTextField(labelWithString: caption)
         captionLabel.font = .systemFont(ofSize: 12)
-        captionLabel.textColor = .secondaryLabelColor
+        captionLabel.textColor = NSColor.labelColor.withAlphaComponent(0.52)
 
         let textStack = NSStackView(views: [valueRow, captionLabel])
         textStack.orientation = .vertical
@@ -1371,96 +1664,133 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         icon.translatesAutoresizingMaskIntoConstraints = false
         textStack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 137),
-            icon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            container.widthAnchor.constraint(equalToConstant: 120),
+            container.heightAnchor.constraint(equalToConstant: 54),
+            icon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: iconLeading),
             icon.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            textStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 54),
+            textStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: textLeading),
             textStack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            textStack.widthAnchor.constraint(equalToConstant: 72)
+            textStack.widthAnchor.constraint(equalToConstant: 78)
         ])
         return container
     }
 
     private func makeGlobalTimingRow() -> NSView {
+        let icon = SettingsRowIconView(kind: .forwardDelay)
+        icon.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 22).isActive = true
+
         let titleLabel = NSTextField(labelWithString: "转发延迟")
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.widthAnchor.constraint(equalToConstant: 58).isActive = true
 
-        let detailLabel = NSTextField(labelWithString: "切换为豆包输入法后，触发快捷键延迟")
-        detailLabel.font = .systemFont(ofSize: 11)
-        detailLabel.textColor = .secondaryLabelColor
-        detailLabel.lineBreakMode = .byTruncatingTail
-
-        let labelRow = NSStackView(views: [titleLabel, detailLabel])
-        labelRow.orientation = .horizontal
-        labelRow.spacing = 8
-        labelRow.alignment = .firstBaseline
-        labelRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let detailLabel = NSTextField(labelWithString: "切换到豆包输入法")
+        detailLabel.font = .systemFont(ofSize: 10)
+        detailLabel.textColor = designSecondaryTextColor
+        detailLabel.lineBreakMode = .byClipping
+        detailLabel.setContentHuggingPriority(.required, for: .horizontal)
+        detailLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let valueView = makeTimingValueEditor(textField: forwardDelayTextField, stepper: forwardDelayStepper)
-        valueView.widthAnchor.constraint(equalToConstant: 106).isActive = true
+        valueView.widthAnchor.constraint(equalToConstant: 78).isActive = true
 
-        let row = NSStackView(views: [labelRow, valueView])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.distribution = .fill
-        row.spacing = 12
-        row.widthAnchor.constraint(equalToConstant: 414).isActive = true
-        row.heightAnchor.constraint(equalToConstant: 32).isActive = true
-        valueView.setContentHuggingPriority(.required, for: .horizontal)
-        return row
-    }
+        let suffixLabel = NSTextField(labelWithString: "后触发语音输入")
+        suffixLabel.font = .systemFont(ofSize: 11.5)
+        suffixLabel.textColor = NSColor.labelColor.withAlphaComponent(0.54)
 
-    private func makeShortcutRow(title: String, detail: String, timingView: NSView, button: NSButton) -> NSView {
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        let detailLabel = NSTextField(labelWithString: detail)
-        detailLabel.font = .systemFont(ofSize: 13)
-        detailLabel.textColor = .secondaryLabelColor
-
-        let textStack = NSStackView(views: [titleLabel, detailLabel])
-        textStack.orientation = .vertical
-        textStack.spacing = 5
-        textStack.alignment = .leading
-        textStack.translatesAutoresizingMaskIntoConstraints = false
-        timingView.translatesAutoresizingMaskIntoConstraints = false
-        button.translatesAutoresizingMaskIntoConstraints = false
+        let sentence = NSStackView(views: [detailLabel, valueView, suffixLabel])
+        sentence.orientation = .horizontal
+        sentence.spacing = 3
+        sentence.alignment = .centerY
+        sentence.distribution = .fill
+        sentence.widthAnchor.constraint(equalToConstant: 278).isActive = true
 
         let row = EditingDismissView()
-        row.addSubview(textStack)
-        row.addSubview(timingView)
-        row.addSubview(button)
+        row.addSubview(icon)
+        row.addSubview(titleLabel)
+        row.addSubview(sentence)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        sentence.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: 428).isActive = true
+        row.heightAnchor.constraint(equalToConstant: 39).isActive = true
         NSLayoutConstraint.activate([
-            row.widthAnchor.constraint(equalToConstant: 422),
-            row.heightAnchor.constraint(equalToConstant: 58),
-            textStack.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            textStack.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            textStack.widthAnchor.constraint(equalToConstant: 155),
-            timingView.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 165),
-            timingView.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            timingView.widthAnchor.constraint(equalToConstant: 172),
-            timingView.heightAnchor.constraint(equalToConstant: 30),
-            button.trailingAnchor.constraint(equalTo: row.trailingAnchor),
-            button.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+            icon.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            icon.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 30),
+            titleLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            sentence.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 150),
+            sentence.centerYAnchor.constraint(equalTo: row.centerYAnchor)
         ])
         return row
     }
 
-    private func makeTimingControl(title: String, textField: NSTextField, stepper: NSStepper) -> NSView {
+    private func makeShortcutRow(
+        iconKind: SettingsIconKind,
+        title: String,
+        prefix: String,
+        button: NSButton,
+        suffix: String,
+        timingView: NSView?,
+        timingWidth: CGFloat = 0
+    ) -> NSView {
+        let icon = SettingsRowIconView(kind: iconKind)
+        icon.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 22).isActive = true
+
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 12)
-        titleLabel.textColor = .secondaryLabelColor
-        titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.widthAnchor.constraint(equalToConstant: 60).isActive = true
 
-        let editor = makeTimingValueEditor(textField: textField, stepper: stepper)
-        editor.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        let prefixLabel = NSTextField(labelWithString: prefix)
+        prefixLabel.font = .systemFont(ofSize: 9.5)
+        prefixLabel.textColor = designSecondaryTextColor
+        prefixLabel.widthAnchor.constraint(equalToConstant: 20).isActive = true
 
-        let row = NSStackView(views: [titleLabel, editor])
-        row.orientation = .horizontal
-        row.spacing = 4
-        row.alignment = .centerY
-        row.distribution = .fill
+        let suffixLabel = NSTextField(labelWithString: suffix)
+        suffixLabel.font = .systemFont(ofSize: 9.5)
+        suffixLabel.textColor = designSecondaryTextColor
+        suffixLabel.lineBreakMode = .byTruncatingTail
+        suffixLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        button.translatesAutoresizingMaskIntoConstraints = false
+
+        let row = EditingDismissView()
+        [icon, titleLabel, prefixLabel, button, suffixLabel].forEach {
+            row.addSubview($0)
+            $0.translatesAutoresizingMaskIntoConstraints = false
+        }
+        row.widthAnchor.constraint(equalToConstant: 430).isActive = true
+        row.heightAnchor.constraint(equalToConstant: 35).isActive = true
+        var constraints: [NSLayoutConstraint] = [
+            icon.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            icon.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 29),
+            titleLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            prefixLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 152),
+            prefixLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            button.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 175),
+            button.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            suffixLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 228),
+            suffixLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+        ]
+        if let timingView {
+            timingView.translatesAutoresizingMaskIntoConstraints = false
+            timingView.widthAnchor.constraint(equalToConstant: timingWidth).isActive = true
+            row.addSubview(timingView)
+            constraints.append(contentsOf: [
+                suffixLabel.widthAnchor.constraint(equalToConstant: 120),
+                timingView.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 351),
+                timingView.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+            ])
+        } else {
+            constraints.append(suffixLabel.widthAnchor.constraint(equalToConstant: 140))
+        }
+        NSLayoutConstraint.activate(constraints)
         return row
+    }
+
+    private func makeTimingControl(title _: String, textField: NSTextField, stepper: NSStepper) -> NSView {
+        makeTimingValueEditor(textField: textField, stepper: stepper)
     }
 
     private func makeEmptyTimingPlaceholder() -> NSView {
@@ -1471,26 +1801,31 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     }
 
     private func makeTimingValueEditor(textField: NSTextField, stepper: NSStepper) -> NSView {
-        textField.widthAnchor.constraint(equalToConstant: 48).isActive = true
-        textField.heightAnchor.constraint(equalToConstant: 27).isActive = true
-        stepper.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        textField.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        textField.heightAnchor.constraint(equalToConstant: 25).isActive = true
+        stepper.widthAnchor.constraint(equalToConstant: 14).isActive = true
+        stepper.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        textField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        stepper.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let unitLabel = NSTextField(labelWithString: "ms")
         unitLabel.font = .systemFont(ofSize: 12)
-        unitLabel.textColor = .secondaryLabelColor
+        unitLabel.textColor = NSColor.labelColor.withAlphaComponent(0.52)
 
         let row = NSStackView(views: [textField, stepper, unitLabel])
         row.orientation = .horizontal
-        row.spacing = 3
+        row.spacing = 4
         row.alignment = .centerY
         row.distribution = .fill
+        stepper.setContentHuggingPriority(.required, for: .horizontal)
+        unitLabel.setContentHuggingPriority(.required, for: .horizontal)
         return row
     }
 
     private func makeVerticalDivider() -> NSView {
         let divider = EditingDismissView()
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.24).cgColor
+        divider.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.11).cgColor
         divider.widthAnchor.constraint(equalToConstant: 1).isActive = true
         divider.heightAnchor.constraint(equalToConstant: 42).isActive = true
         return divider
@@ -1499,9 +1834,9 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     private func makeHorizontalDivider() -> NSView {
         let divider = EditingDismissView()
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
+        divider.layer?.backgroundColor = designDividerColor.cgColor
         divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        divider.widthAnchor.constraint(equalToConstant: 422).isActive = true
+        divider.widthAnchor.constraint(equalToConstant: 430).isActive = true
         return divider
     }
 
@@ -1513,12 +1848,12 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         let topDivider = EditingDismissView()
         topDivider.translatesAutoresizingMaskIntoConstraints = false
         topDivider.wantsLayer = true
-        topDivider.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.24).cgColor
+        topDivider.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.11).cgColor
 
         let dividers = (0..<max(0, buttons.count - 1)).map { _ -> NSView in
             let divider = EditingDismissView()
             divider.wantsLayer = true
-            divider.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
+            divider.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.12).cgColor
             divider.widthAnchor.constraint(equalToConstant: 1).isActive = true
             divider.heightAnchor.constraint(equalToConstant: 21).isActive = true
             return divider
@@ -1544,7 +1879,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         let bar = EditingDismissView()
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.wantsLayer = true
-        bar.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.06).cgColor
+        bar.layer?.backgroundColor = NSColor(calibratedRed: 0.98, green: 0.98, blue: 0.985, alpha: 0.74).cgColor
         bar.addSubview(topDivider)
         bar.addSubview(row)
         NSLayoutConstraint.activate([
@@ -1561,8 +1896,10 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     }
 
     private func configureShortcutButton(_ button: NSButton) {
-        button.font = .systemFont(ofSize: 15, weight: .medium)
-        button.heightAnchor.constraint(equalToConstant: 33).isActive = true
+        button.font = .systemFont(ofSize: 10, weight: .medium)
+        button.widthAnchor.constraint(equalToConstant: 50).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 25).isActive = true
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
     private func configureTimingControls() {
@@ -1613,12 +1950,29 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     }
 
     private func configureTimingPair(textField: NSTextField, stepper: NSStepper, tag: Int, value: Int) {
+        let centeredCell = CenteredTextFieldCell(textCell: "")
+        centeredCell.alignment = .center
+        centeredCell.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        centeredCell.isEditable = true
+        centeredCell.isSelectable = true
+        centeredCell.isScrollable = true
+        centeredCell.usesSingleLineMode = true
+        centeredCell.lineBreakMode = .byClipping
+        textField.cell = centeredCell
         textField.tag = tag
         textField.delegate = self
-        textField.alignment = .right
-        textField.font = .monospacedDigitSystemFont(ofSize: 14, weight: .regular)
+        textField.alignment = .center
+        textField.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
         textField.controlSize = .small
-        textField.bezelStyle = .roundedBezel
+        textField.isBezeled = false
+        textField.isBordered = false
+        textField.drawsBackground = true
+        textField.backgroundColor = NSColor(calibratedRed: 0.962, green: 0.965, blue: 0.969, alpha: 1.0)
+        textField.focusRingType = .none
+        textField.wantsLayer = true
+        textField.layer?.cornerRadius = 6
+        textField.layer?.borderWidth = 1
+        textField.layer?.borderColor = NSColor(calibratedRed: 0.878, green: 0.890, blue: 0.906, alpha: 1.0).cgColor
         textField.formatter = makeMillisecondsFormatter()
         textField.target = self
         textField.action = #selector(timingTextFieldSubmitted(_:))
@@ -1712,6 +2066,10 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         let current = displayName(forInputSourceID: inputSourceService.currentSourceID())
         messageLabel.stringValue = statusMessage ?? "监听开启后，仅已选择的快捷键会触发自动切换。"
         monitorStatusValueLabel.stringValue = isMonitoring ? "监听中" : "已暂停"
+        monitorStatusIconView.waveAssetName = isMonitoring ? "icon-status-wave-listening" : "icon-status-wave-paused"
+        monitorStatusIconView.waveColor = isMonitoring
+            ? NSColor(calibratedRed: 0.09, green: 0.72, blue: 0.33, alpha: 1.0)
+            : .systemRed
         monitorStatusDotView.layer?.backgroundColor = (isMonitoring ? NSColor.systemGreen : NSColor.systemRed).cgColor
         doubaoStatusValueLabel.stringValue = installed
         currentInputValueLabel.stringValue = current
@@ -1731,9 +2089,9 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     }
 
     private func updateShortcutButtons() {
-        holdShortcutButton.title = holdShortcut?.display ?? "未设置"
-        doubleTapShortcutButton.title = doubleTapShortcut?.display ?? "未设置"
-        singleTapShortcutButton.title = singleTapShortcut?.display ?? "未设置"
+        holdShortcutButton.title = holdShortcut?.display ?? "快捷键"
+        doubleTapShortcutButton.title = doubleTapShortcut?.display ?? "快捷键"
+        singleTapShortcutButton.title = singleTapShortcut?.display ?? "快捷键"
     }
 
     private func updateMonitorToggleButton() {
@@ -2085,9 +2443,13 @@ private final class PrimaryActionButton: NSButton {
         self.title = title
         isBordered = false
         wantsLayer = true
-        layer?.cornerRadius = 8
-        layer?.backgroundColor = NSColor.systemBlue.cgColor
-        font = .systemFont(ofSize: 16, weight: .semibold)
+        layer?.cornerRadius = 9
+        layer?.backgroundColor = NSColor(srgbRed: 0.0, green: 0.42, blue: 0.94, alpha: 1.0).cgColor
+        layer?.shadowColor = NSColor(srgbRed: 0.0, green: 0.45, blue: 0.92, alpha: 1.0).cgColor
+        layer?.shadowOpacity = 0.22
+        layer?.shadowRadius = 16
+        layer?.shadowOffset = CGSize(width: 0, height: -8)
+        font = .systemFont(ofSize: 15, weight: .semibold)
         contentTintColor = .white
     }
 
@@ -2097,11 +2459,18 @@ private final class PrimaryActionButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.systemBlue.setFill()
-        bounds.insetBy(dx: 0.5, dy: 0.5).roundedPath(radius: 8).fill()
+        let path = bounds.insetBy(dx: 0.5, dy: 0.5).roundedPath(radius: 9)
+        NSGraphicsContext.saveGraphicsState()
+        path.addClip()
+        let gradient = NSGradient(
+            starting: NSColor(srgbRed: 0.03, green: 0.51, blue: 0.98, alpha: 1.0),
+            ending: NSColor(srgbRed: 0.0, green: 0.44, blue: 0.92, alpha: 1.0)
+        )
+        gradient?.draw(in: bounds, angle: -90)
+        NSGraphicsContext.restoreGraphicsState()
 
         let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 16, weight: .semibold),
+            .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
             .foregroundColor: NSColor.white
         ]
         let textSize = title.size(withAttributes: textAttributes)
@@ -2175,51 +2544,178 @@ private final class ShortcutSelectButton: NSButton {
 
     override func draw(_ dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 0.75, dy: 0.75)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
         let fill = isHighlighted
             ? NSColor.controlAccentColor.withAlphaComponent(0.10)
-            : NSColor.controlBackgroundColor.withAlphaComponent(0.36)
+            : NSColor(calibratedRed: 0.962, green: 0.965, blue: 0.969, alpha: 1.0)
         fill.setFill()
         path.fill()
-        NSColor.separatorColor.withAlphaComponent(0.24).setStroke()
+        NSColor(calibratedRed: 0.83, green: 0.84, blue: 0.86, alpha: 1.0).setStroke()
         path.lineWidth = 1
         path.stroke()
 
         let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 15, weight: .medium),
-            .foregroundColor: NSColor.controlTextColor
+            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: NSColor.black.withAlphaComponent(0.86)
         ]
-        let textSize = title.size(withAttributes: textAttributes)
-        let textX = max(12, (bounds.width - textSize.width) / 2 - 6)
-        title.draw(
-            at: NSPoint(x: textX, y: bounds.midY - textSize.height / 2),
+        let displayTitle = title.count > 5 ? String(title.prefix(5)) : title
+        let textSize = displayTitle.size(withAttributes: textAttributes)
+        displayTitle.draw(
+            at: NSPoint(x: (bounds.width - textSize.width) / 2, y: bounds.midY - textSize.height / 2),
             withAttributes: textAttributes
         )
+    }
+}
 
-        let badgeSize: CGFloat = 14
-        let badgeRect = NSRect(
-            x: bounds.maxX - badgeSize - 10,
-            y: bounds.midY - badgeSize / 2,
-            width: badgeSize,
-            height: badgeSize
+private final class SettingsRowIconView: NSView {
+    private let kind: SettingsIconKind
+
+    init(kind: SettingsIconKind) {
+        self.kind = kind
+        super.init(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if let image = IconAssetLoader.image(named: kind.assetName) {
+            image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1.0)
+            return
+        }
+
+        let rect = bounds.insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
+        NSGraphicsContext.saveGraphicsState()
+        path.addClip()
+        iconGradient.draw(in: rect, angle: -90)
+        NSGraphicsContext.restoreGraphicsState()
+
+        switch kind {
+        case .forwardDelay:
+            drawHourglass(in: rect)
+        case .singleTap:
+            drawCursor(in: rect, offset: .zero, alpha: 1.0)
+        case .doubleTap:
+            drawCursor(in: rect, offset: NSPoint(x: -2.1, y: 2.0), alpha: 0.58)
+            drawCursor(in: rect, offset: NSPoint(x: 1.0, y: -0.9), alpha: 1.0)
+        case .longPress:
+            drawFinger(in: rect)
+        }
+    }
+
+    private var iconGradient: NSGradient {
+        switch kind {
+        case .forwardDelay:
+            return NSGradient(starting: NSColor(calibratedRed: 1.0, green: 0.70, blue: 0.25, alpha: 1), ending: NSColor(calibratedRed: 1.0, green: 0.54, blue: 0.0, alpha: 1))!
+        case .singleTap:
+            return NSGradient(starting: NSColor(calibratedRed: 0.34, green: 0.85, blue: 0.47, alpha: 1), ending: NSColor(calibratedRed: 0.07, green: 0.63, blue: 0.31, alpha: 1))!
+        case .doubleTap:
+            return NSGradient(starting: NSColor(calibratedRed: 0.27, green: 0.66, blue: 1.0, alpha: 1), ending: NSColor(calibratedRed: 0.0, green: 0.40, blue: 0.84, alpha: 1))!
+        case .longPress:
+            return NSGradient(starting: NSColor(calibratedRed: 0.78, green: 0.49, blue: 1.0, alpha: 1), ending: NSColor(calibratedRed: 0.49, green: 0.24, blue: 0.80, alpha: 1))!
+        }
+    }
+
+    private func drawHourglass(in rect: NSRect) {
+        let stroke = NSBezierPath()
+        stroke.lineWidth = 1.6
+        stroke.lineCapStyle = .round
+        stroke.lineJoinStyle = .round
+        stroke.move(to: NSPoint(x: rect.minX + 6.3, y: rect.maxY - 5.0))
+        stroke.line(to: NSPoint(x: rect.maxX - 6.3, y: rect.maxY - 5.0))
+        stroke.move(to: NSPoint(x: rect.minX + 6.3, y: rect.minY + 5.0))
+        stroke.line(to: NSPoint(x: rect.maxX - 6.3, y: rect.minY + 5.0))
+        stroke.move(to: NSPoint(x: rect.minX + 7.1, y: rect.maxY - 6.0))
+        stroke.curve(
+            to: NSPoint(x: rect.maxX - 7.1, y: rect.minY + 6.0),
+            controlPoint1: NSPoint(x: rect.minX + 7.5, y: rect.maxY - 9.0),
+            controlPoint2: NSPoint(x: rect.maxX - 7.5, y: rect.minY + 9.0)
         )
-        NSColor.secondaryLabelColor.withAlphaComponent(0.50).setFill()
-        NSBezierPath(ovalIn: badgeRect).fill()
+        stroke.move(to: NSPoint(x: rect.maxX - 7.1, y: rect.maxY - 6.0))
+        stroke.curve(
+            to: NSPoint(x: rect.minX + 7.1, y: rect.minY + 6.0),
+            controlPoint1: NSPoint(x: rect.maxX - 7.5, y: rect.maxY - 9.0),
+            controlPoint2: NSPoint(x: rect.minX + 7.5, y: rect.minY + 9.0)
+        )
+        NSColor.white.setStroke()
+        stroke.stroke()
+    }
 
-        let mark = NSBezierPath()
-        mark.lineWidth = 1.6
-        mark.lineCapStyle = .round
-        mark.move(to: NSPoint(x: badgeRect.minX + 4.5, y: badgeRect.minY + 4.5))
-        mark.line(to: NSPoint(x: badgeRect.maxX - 4.5, y: badgeRect.maxY - 4.5))
-        mark.move(to: NSPoint(x: badgeRect.maxX - 4.5, y: badgeRect.minY + 4.5))
-        mark.line(to: NSPoint(x: badgeRect.minX + 4.5, y: badgeRect.maxY - 4.5))
-        NSColor.white.withAlphaComponent(0.92).setStroke()
-        mark.stroke()
+    private func drawCursor(in rect: NSRect, offset: NSPoint, alpha: CGFloat) {
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: rect.minX + 5.2 + offset.x, y: rect.maxY - 4.0 + offset.y))
+        path.line(to: NSPoint(x: rect.maxX - 4.0 + offset.x, y: rect.midY + 0.3 + offset.y))
+        path.line(to: NSPoint(x: rect.maxX - 7.7 + offset.x, y: rect.midY - 1.0 + offset.y))
+        path.line(to: NSPoint(x: rect.maxX - 5.1 + offset.x, y: rect.minY + 4.0 + offset.y))
+        path.line(to: NSPoint(x: rect.maxX - 7.2 + offset.x, y: rect.minY + 3.0 + offset.y))
+        path.line(to: NSPoint(x: rect.maxX - 9.9 + offset.x, y: rect.midY - 2.1 + offset.y))
+        path.line(to: NSPoint(x: rect.minX + 7.0 + offset.x, y: rect.minY + 6.4 + offset.y))
+        path.close()
+        NSColor.white.withAlphaComponent(alpha).setFill()
+        path.fill()
+    }
+
+    private func drawFinger(in rect: NSRect) {
+        let finger = NSBezierPath()
+        finger.lineWidth = 2.05
+        finger.lineJoinStyle = .round
+        finger.lineCapStyle = .round
+        finger.move(to: NSPoint(x: rect.midX - 0.7, y: rect.minY + 4.6))
+        finger.line(to: NSPoint(x: rect.midX - 0.7, y: rect.maxY - 5.1))
+        finger.curve(
+            to: NSPoint(x: rect.midX + 2.0, y: rect.maxY - 5.1),
+            controlPoint1: NSPoint(x: rect.midX - 0.7, y: rect.maxY - 3.5),
+            controlPoint2: NSPoint(x: rect.midX + 2.0, y: rect.maxY - 3.5)
+        )
+        finger.line(to: NSPoint(x: rect.midX + 2.0, y: rect.midY - 0.5))
+        finger.line(to: NSPoint(x: rect.maxX - 5.0, y: rect.midY + 0.8))
+        finger.curve(
+            to: NSPoint(x: rect.maxX - 3.7, y: rect.midY - 1.6),
+            controlPoint1: NSPoint(x: rect.maxX - 3.6, y: rect.midY + 0.9),
+            controlPoint2: NSPoint(x: rect.maxX - 3.0, y: rect.midY - 0.4)
+        )
+        finger.line(to: NSPoint(x: rect.maxX - 5.0, y: rect.minY + 4.1))
+        finger.curve(
+            to: NSPoint(x: rect.midX - 0.6, y: rect.minY + 3.4),
+            controlPoint1: NSPoint(x: rect.maxX - 6.2, y: rect.minY + 2.6),
+            controlPoint2: NSPoint(x: rect.midX + 1.3, y: rect.minY + 2.5)
+        )
+        finger.line(to: NSPoint(x: rect.minX + 6.0, y: rect.minY + 5.8))
+        NSColor.white.setStroke()
+        finger.stroke()
+
+        let pulse = NSBezierPath()
+        pulse.lineWidth = 1.0
+        pulse.lineCapStyle = .round
+        pulse.move(to: NSPoint(x: rect.minX + 6.0, y: rect.maxY - 6.0))
+        pulse.curve(
+            to: NSPoint(x: rect.minX + 5.9, y: rect.midY + 0.4),
+            controlPoint1: NSPoint(x: rect.minX + 4.7, y: rect.maxY - 7.4),
+            controlPoint2: NSPoint(x: rect.minX + 4.5, y: rect.midY + 2.0)
+        )
+        NSColor.white.withAlphaComponent(0.62).setStroke()
+        pulse.stroke()
     }
 }
 
 private final class IconActionButton: NSButton {
     private let symbolName: String
+
+    private var assetName: String? {
+        switch symbolName {
+        case "checkmark.shield":
+            return "icon-footer-accessibility"
+        case "keyboard-clear":
+            return "icon-footer-input-monitoring"
+        default:
+            return nil
+        }
+    }
 
     init(title: String, symbolName: String) {
         self.symbolName = symbolName
@@ -2227,7 +2723,7 @@ private final class IconActionButton: NSButton {
         self.title = title
         isBordered = false
         controlSize = .large
-        font = .systemFont(ofSize: 14, weight: .medium)
+        font = .systemFont(ofSize: 13, weight: .semibold)
     }
 
     @available(*, unavailable)
@@ -2237,8 +2733,8 @@ private final class IconActionButton: NSButton {
 
     override func draw(_ dirtyRect: NSRect) {
         let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
-            .foregroundColor: NSColor.controlTextColor
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.82)
         ]
         let textSize = title.size(withAttributes: textAttributes)
         let iconSize = NSSize(width: 16, height: 16)
@@ -2247,8 +2743,15 @@ private final class IconActionButton: NSButton {
         let startX = (bounds.width - totalWidth) / 2
         let centerY = bounds.midY
 
-        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
-            let imageRect = NSRect(x: startX, y: centerY - iconSize.height / 2, width: iconSize.width, height: iconSize.height)
+        let imageRect = NSRect(x: startX, y: centerY - iconSize.height / 2, width: iconSize.width, height: iconSize.height)
+        if let assetName,
+           let image = IconAssetLoader.image(named: assetName) {
+            IconAssetLoader.draw(image, in: imageRect, fraction: isEnabled ? 1.0 : 0.35, flippedVertically: true)
+        } else if symbolName == "keyboard-clear" {
+            drawClearKeyboard(in: imageRect)
+        } else if symbolName == "slider.horizontal.3" {
+            drawSliders(in: imageRect)
+        } else if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
             image.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: isEnabled ? 1.0 : 0.35)
         }
 
@@ -2256,6 +2759,49 @@ private final class IconActionButton: NSButton {
             at: NSPoint(x: startX + iconSize.width + spacing, y: centerY - textSize.height / 2),
             withAttributes: textAttributes
         )
+    }
+
+    private func drawClearKeyboard(in rect: NSRect) {
+        let color = NSColor.controlTextColor.withAlphaComponent(0.88)
+        color.setStroke()
+        color.setFill()
+
+        let body = NSBezierPath(roundedRect: rect.insetBy(dx: 1.8, dy: 3.6), xRadius: 2.1, yRadius: 2.1)
+        body.lineWidth = 1.45
+        body.stroke()
+
+        for x in [rect.minX + 4.0, rect.minX + 7.2, rect.minX + 10.45] {
+            NSBezierPath(roundedRect: NSRect(x: x, y: rect.minY + 8.8, width: 1.55, height: 1.55), xRadius: 0.45, yRadius: 0.45).fill()
+        }
+        NSBezierPath(roundedRect: NSRect(x: rect.minX + 4.0, y: rect.minY + 5.55, width: 5.25, height: 1.35), xRadius: 0.65, yRadius: 0.65).fill()
+        NSBezierPath(roundedRect: NSRect(x: rect.minX + 10.45, y: rect.minY + 5.55, width: 1.55, height: 1.35), xRadius: 0.45, yRadius: 0.45).fill()
+    }
+
+    private func drawSliders(in rect: NSRect) {
+        let color = NSColor.controlTextColor.withAlphaComponent(0.88)
+        color.setStroke()
+        color.setFill()
+
+        func line(from x1: CGFloat, to x2: CGFloat, y: CGFloat) {
+            let path = NSBezierPath()
+            path.lineWidth = 1.55
+            path.lineCapStyle = .round
+            path.move(to: NSPoint(x: x1, y: y))
+            path.line(to: NSPoint(x: x2, y: y))
+            path.stroke()
+        }
+
+        line(from: rect.minX + 2.4, to: rect.minX + 6.2, y: rect.minY + 11.75)
+        line(from: rect.minX + 9.75, to: rect.minX + 13.6, y: rect.minY + 11.75)
+        NSBezierPath(ovalIn: NSRect(x: rect.minX + 6.6, y: rect.minY + 10.4, width: 2.7, height: 2.7)).stroke()
+
+        line(from: rect.minX + 2.4, to: rect.minX + 3.95, y: rect.minY + 8)
+        line(from: rect.minX + 7.5, to: rect.minX + 13.6, y: rect.minY + 8)
+        NSBezierPath(ovalIn: NSRect(x: rect.minX + 4.3, y: rect.minY + 6.65, width: 2.7, height: 2.7)).stroke()
+
+        line(from: rect.minX + 2.4, to: rect.minX + 8.2, y: rect.minY + 4.25)
+        line(from: rect.minX + 11.75, to: rect.minX + 13.6, y: rect.minY + 4.25)
+        NSBezierPath(ovalIn: NSRect(x: rect.minX + 8.6, y: rect.minY + 2.9, width: 2.7, height: 2.7)).stroke()
     }
 }
 
@@ -2275,15 +2821,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = LauncherViewController()
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: launcherWindowWidth, height: launcherWindowHeight),
-            styleMask: [.titled, .closable, .miniaturizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
+        window.contentMinSize = NSSize(width: launcherWindowWidth, height: launcherWindowHeight)
+        window.contentMaxSize = NSSize(width: launcherWindowWidth, height: launcherWindowHeight)
         window.title = appDisplayName
         window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.styleMask.insert(.fullSizeContentView)
+        [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].forEach {
+            window.standardWindowButton($0)?.isHidden = true
+        }
         window.contentViewController = controller
         window.center()
-        installCenteredTitle(in: window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window

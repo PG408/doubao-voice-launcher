@@ -13,6 +13,9 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "DoubaoVoiceLauncher",
+            resources: [
+                .copy("Resources")
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Carbon"),

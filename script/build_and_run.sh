@@ -20,6 +20,7 @@ swift build -c "$BUILD_CONFIGURATION" --product "$PRODUCT_NAME"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp ".build/$BUILD_CONFIGURATION/$PRODUCT_NAME" "$EXECUTABLE_PATH"
+cp "$ROOT_DIR"/Sources/DoubaoVoiceLauncher/Resources/* "$APP_BUNDLE/Contents/Resources/"
 /usr/bin/swift "$ROOT_DIR/script/generate_app_icon.swift" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
