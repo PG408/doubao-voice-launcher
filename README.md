@@ -94,7 +94,6 @@
 
 排查免按模式启动问题时，优先查看以下日志片段：
 
-- `No-hold activation context before preflight reset`：记录触发前的系统修饰键状态、前台 App、焦点控件角色和是否疑似文本输入控件。
 - `No-hold activation preflight reset keyUp sent`：表示输入法确认后已经前置发送一次 `keyUp` reset。
 - `No-hold activation pending after forwarded keyDown`：表示某次启动尝试已经发送 `keyDown`。
 - `No-hold activation probe 1/3`、`2/3`、`3/3`：表示 `350ms / 600ms / 750ms` 的启动确认检测。

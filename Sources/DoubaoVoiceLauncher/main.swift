@@ -692,85 +692,6 @@ private enum DoubaoAudioInputProbe {
     }
 }
 
-private struct VoiceActivationContextSnapshot {
-    let modifierFlagsRaw: UInt64
-    let frontmostAppName: String
-    let frontmostBundleID: String
-    let focusedRole: String
-    let focusedSubrole: String
-    let focusedEditable: Bool
-
-    var logDescription: String {
-        "modifierFlags=\(modifierFlagsRaw), frontmostApp=\(frontmostAppName), frontmostBundleID=\(frontmostBundleID), focusedRole=\(focusedRole), focusedSubrole=\(focusedSubrole), focusedEditable=\(focusedEditable)"
-    }
-}
-
-private enum VoiceActivationContextProbe {
-    private static let editableAttribute = "AXEditable" as CFString
-
-    static func capture() -> VoiceActivationContextSnapshot {
-        let flags = CGEventSource.flagsState(.combinedSessionState)
-        let frontmostApplication = NSWorkspace.shared.frontmostApplication
-        let focusedElement = focusedElementInfo()
-        return VoiceActivationContextSnapshot(
-            modifierFlagsRaw: flags.rawValue,
-            frontmostAppName: frontmostApplication?.localizedName ?? "nil",
-            frontmostBundleID: frontmostApplication?.bundleIdentifier ?? "nil",
-            focusedRole: focusedElement.role,
-            focusedSubrole: focusedElement.subrole,
-            focusedEditable: focusedElement.isEditable
-        )
-    }
-
-    private static func focusedElementInfo() -> (role: String, subrole: String, isEditable: Bool) {
-        let systemWideElement = AXUIElementCreateSystemWide()
-        var focusedValue: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(
-            systemWideElement,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedValue
-        )
-        guard status == .success, let focusedValue else {
-            return ("unavailable(status=\(status.rawValue))", "nil", false)
-        }
-        guard CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
-            return ("unexpectedType(\(CFGetTypeID(focusedValue)))", "nil", false)
-        }
-
-        let focusedElement = focusedValue as! AXUIElement
-        let role = stringAttribute(focusedElement, kAXRoleAttribute as CFString) ?? "nil"
-        let subrole = stringAttribute(focusedElement, kAXSubroleAttribute as CFString) ?? "nil"
-        let editable = boolAttribute(focusedElement, editableAttribute) ?? false
-        let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox"]
-        return (role, subrole, editable || textInputRoles.contains(role))
-    }
-
-    private static func stringAttribute(_ element: AXUIElement, _ attribute: CFString) -> String? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
-            return nil
-        }
-        if let string = value as? String {
-            return string
-        }
-        return value.map { String(describing: $0) }
-    }
-
-    private static func boolAttribute(_ element: AXUIElement, _ attribute: CFString) -> Bool? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
-            return nil
-        }
-        if let bool = value as? Bool {
-            return bool
-        }
-        if let number = value as? NSNumber {
-            return number.boolValue
-        }
-        return nil
-    }
-}
-
 private enum ShortcutSender {
     private static let syntheticEventMarker: Int64 = 0x44424F494D45
 
@@ -1286,9 +1207,6 @@ private final class RightControlAutomation {
         shortcut: Shortcut,
         kind: VoiceSessionKind
     ) {
-        let snapshot = VoiceActivationContextProbe.capture()
-        AppLog.automation.info("No-hold activation context before preflight reset: \(snapshot.logDescription, privacy: .public)")
-        FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold activation context before preflight reset: \(snapshot.logDescription)")
         AppLog.automation.info("No-hold activation preflight reset keyUp sent; waiting configured forward delay \(self.forwardDelay, privacy: .public) seconds")
         FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold activation preflight reset keyUp sent; waiting configured forward delay \(forwardDelay) seconds")
         forwardShortcutEvent {
@@ -1734,31 +1652,6 @@ private final class CenteredTextFieldCell: NSTextFieldCell {
     }
 }
 
-private final class TrafficLightStripView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let colors = [
-            NSColor(calibratedRed: 1.0, green: 0.372, blue: 0.341, alpha: 1.0),
-            NSColor(calibratedRed: 0.996, green: 0.737, blue: 0.180, alpha: 1.0),
-            NSColor(calibratedRed: 0.157, green: 0.784, blue: 0.251, alpha: 1.0)
-        ]
-        for (index, color) in colors.enumerated() {
-            color.setFill()
-            let rect = NSRect(x: CGFloat(index) * 20, y: 0, width: 12, height: 12)
-            NSBezierPath(ovalIn: rect).fill()
-        }
-    }
-}
-
 private final class StatusIconView: NSView {
     private let kind: StatusIconKind
     var waveAssetName = "icon-status-wave-paused" {
@@ -2062,9 +1955,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         titleLabel.textColor = NSColor.labelColor.withAlphaComponent(0.86)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let trafficLights = TrafficLightStripView()
-        trafficLights.translatesAutoresizingMaskIntoConstraints = false
-
         let bar = EditingDismissView()
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.wantsLayer = true
@@ -2075,14 +1965,9 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         bottomLine.wantsLayer = true
         bottomLine.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.08).cgColor
 
-        bar.addSubview(trafficLights)
         bar.addSubview(titleLabel)
         bar.addSubview(bottomLine)
         NSLayoutConstraint.activate([
-            trafficLights.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 14),
-            trafficLights.centerYAnchor.constraint(equalTo: bar.centerYAnchor, constant: 1),
-            trafficLights.widthAnchor.constraint(equalToConstant: 52),
-            trafficLights.heightAnchor.constraint(equalToConstant: 12),
             titleLabel.centerXAnchor.constraint(equalTo: bar.centerXAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor, constant: 1),
             bottomLine.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
@@ -3362,6 +3247,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         AppLog.app.info("Application did finish launching")
         FileDebugLog.record(level: "INFO", category: "App", message: "Application did finish launching")
         NSApp.setActivationPolicy(.regular)
+        installMainMenu()
         let controller = LauncherViewController()
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: launcherWindowWidth, height: launcherWindowHeight),
@@ -3375,9 +3261,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
-        [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].forEach {
-            window.standardWindowButton($0)?.isHidden = true
-        }
+        window.standardWindowButton(.closeButton)?.isHidden = false
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = false
+        window.standardWindowButton(.zoomButton)?.isHidden = true
         window.contentViewController = controller
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -3385,6 +3271,35 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         self.window = window
         AppLog.app.info("Main window is visible")
         FileDebugLog.record(level: "INFO", category: "App", message: "Main window is visible")
+    }
+
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        appMenuItem.title = appDisplayName
+        let appMenu = NSMenu()
+        appMenu.addItem(
+            withTitle: "退出 \(appDisplayName)",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let windowMenuItem = NSMenuItem()
+        windowMenuItem.title = "窗口"
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(
+            withTitle: "最小化",
+            action: #selector(NSWindow.performMiniaturize(_:)),
+            keyEquivalent: "m"
+        )
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func installCenteredTitle(in window: NSWindow) {
