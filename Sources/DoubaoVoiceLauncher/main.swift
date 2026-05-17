@@ -9,13 +9,20 @@ import OSLog
 private let doubaoInputSourceID = "com.bytedance.inputmethod.doubaoime.pinyin"
 private let appDisplayName = "豆包语音输入切换"
 private let appLogSubsystem = Bundle.main.bundleIdentifier ?? "com.local.doubao.voice-launcher"
-private let launcherWindowWidth: CGFloat = 480
+private let launcherWindowWidth: CGFloat = 440
 private let launcherWindowHeight: CGFloat = 538
-private let launcherContentWidth: CGFloat = 450
+private let launcherContentWidth: CGFloat = 410
+private let launcherCardContentWidth: CGFloat = launcherContentWidth - 22
+private let launcherShortcutContentWidth: CGFloat = launcherContentWidth - 20
 private let designBorderColor = NSColor.black.withAlphaComponent(0.09)
 private let designDividerColor = NSColor.black.withAlphaComponent(0.09)
 private let designCardFillColor = NSColor.white.withAlphaComponent(0.64)
 private let designSecondaryTextColor = NSColor(calibratedRed: 0.42, green: 0.44, blue: 0.47, alpha: 1.0)
+private let designSettingsAuxiliaryFont = NSFont.systemFont(ofSize: 9.5)
+private let designInlineControlGap: CGFloat = 3
+private let designStatusIconSize: CGFloat = 23
+private let designStatusIconTextGap: CGFloat = 8
+private let designStatusTextWidth: CGFloat = 78
 private let doubaoPreferenceDomains = [
     "com.bytedance.inputmethod.doubaoime",
     "com.bytedance.inputmethod.doubaoime.settings"
@@ -1653,6 +1660,8 @@ private final class CenteredTextFieldCell: NSTextFieldCell {
 }
 
 private final class StatusIconView: NSView {
+    private static let drawingBaseSize: CGFloat = 20
+
     private let kind: StatusIconKind
     var waveAssetName = "icon-status-wave-paused" {
         didSet {
@@ -1687,12 +1696,31 @@ private final class StatusIconView: NSView {
                 IconAssetLoader.draw(image, in: bounds)
                 return
             }
-            drawWave()
+            drawInCenteredCanvas {
+                drawWave()
+            }
         case .check:
-            drawCheck()
+            drawInCenteredCanvas {
+                drawCheck()
+            }
         case .keyboard:
-            drawKeyboard()
+            drawInCenteredCanvas {
+                drawKeyboard()
+            }
         }
+    }
+
+    private func drawInCenteredCanvas(_ drawContent: () -> Void) {
+        let scale = min(bounds.width, bounds.height) / Self.drawingBaseSize
+        let translatedX = bounds.midX - (Self.drawingBaseSize * scale / 2)
+        let translatedY = bounds.midY - (Self.drawingBaseSize * scale / 2)
+        NSGraphicsContext.saveGraphicsState()
+        let transform = NSAffineTransform()
+        transform.translateX(by: translatedX, yBy: translatedY)
+        transform.scale(by: scale)
+        transform.concat()
+        drawContent()
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     private func drawWave() {
@@ -1709,7 +1737,7 @@ private final class StatusIconView: NSView {
     }
 
     private func drawCheck() {
-        let circle = NSBezierPath(ovalIn: bounds.insetBy(dx: 2.5, dy: 2.5))
+        let circle = NSBezierPath(ovalIn: NSRect(x: 0, y: 0, width: Self.drawingBaseSize, height: Self.drawingBaseSize).insetBy(dx: 2.5, dy: 2.5))
         circle.lineWidth = 1.8
         circle.stroke()
 
@@ -1724,17 +1752,28 @@ private final class StatusIconView: NSView {
     }
 
     private func drawKeyboard() {
-        let body = NSBezierPath(roundedRect: bounds.insetBy(dx: 2.2, dy: 5.1), xRadius: 2.0, yRadius: 2.0)
+        let drawingBounds = NSRect(x: 0, y: 0, width: Self.drawingBaseSize, height: Self.drawingBaseSize)
+        let body = NSBezierPath(roundedRect: drawingBounds.insetBy(dx: 2.2, dy: 5.1), xRadius: 2.0, yRadius: 2.0)
         body.lineWidth = 1.6
         body.stroke()
 
-        let keyW: CGFloat = 2.0
-        let keyH: CGFloat = 1.6
-        for x in [5.0, 8.0, 11.0, 14.0] {
-            NSBezierPath(roundedRect: NSRect(x: x, y: 10.3, width: keyW, height: keyH), xRadius: 0.5, yRadius: 0.5).fill()
+        let keySize: CGFloat = 1.15
+        let columnGap: CGFloat = 2.7
+        let rowGap: CGFloat = 2.5
+        let columnCount = 4
+        let rowCount = 2
+        let gridWidth = CGFloat(columnCount - 1) * columnGap + keySize
+        let gridHeight = CGFloat(rowCount - 1) * rowGap + keySize
+        let startX = body.bounds.midX - gridWidth / 2
+        let startY = body.bounds.midY - gridHeight / 2
+
+        for row in 0..<rowCount {
+            for column in 0..<columnCount {
+                let x = startX + CGFloat(column) * columnGap
+                let y = startY + CGFloat(row) * rowGap
+                NSBezierPath(ovalIn: NSRect(x: x, y: y, width: keySize, height: keySize)).fill()
+            }
         }
-        NSBezierPath(roundedRect: NSRect(x: 5.0, y: 7.5, width: 8.0, height: 1.6), xRadius: 0.8, yRadius: 0.8).fill()
-        NSBezierPath(roundedRect: NSRect(x: 13.7, y: 7.5, width: 1.8, height: 1.6), xRadius: 0.5, yRadius: 0.5).fill()
     }
 }
 
@@ -1814,7 +1853,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         let titleLabel = NSTextField(labelWithString: "豆包语音输入快速切换")
         titleLabel.font = .systemFont(ofSize: 24, weight: .semibold)
 
-        let explanationLabel = NSTextField(labelWithString: "点击快捷键自动切换到豆包语音输入，输入结束后自动恢复原输入法")
+        let explanationLabel = NSTextField(labelWithString: "使用快捷键自动切换到豆包语音输入，结束后自动恢复原输入法")
         explanationLabel.font = .systemFont(ofSize: 14)
         explanationLabel.textColor = NSColor(calibratedRed: 0.39, green: 0.40, blue: 0.43, alpha: 0.90)
         explanationLabel.lineBreakMode = .byWordWrapping
@@ -1865,7 +1904,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         settingsSectionTitle.font = .systemFont(ofSize: 16, weight: .semibold)
         let globalTimingCard = makeRoundedContainer(
             content: makeGlobalTimingRow(),
-            horizontalPadding: 11,
+            horizontalPadding: 10,
             verticalPadding: 1
         )
         globalTimingCard.heightAnchor.constraint(equalToConstant: 41).isActive = true
@@ -2003,29 +2042,33 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     }
 
     private func makeStatusContent() -> NSView {
+        let statusColumnGap: CGFloat = 17.5
+        let statusColumnWidth = (launcherCardContentWidth - (statusColumnGap * 2) - 2) / 3
+        let firstDividerX = statusColumnWidth
+        let installedItemX = firstDividerX + 1 + statusColumnGap
+        let secondDividerX = installedItemX + statusColumnWidth
+        let inputItemX = secondDividerX + 1 + statusColumnGap
+
         let runningItem = makeStatusItem(
             icon: monitorStatusIconView,
             valueLabel: monitorStatusValueLabel,
             caption: "运行状态",
             showsDot: false,
-            iconLeading: 23.5,
-            textLeading: 48.5
+            columnWidth: statusColumnWidth
         )
         let installedItem = makeStatusItem(
             icon: StatusIconView(kind: .check),
             valueLabel: doubaoStatusValueLabel,
             caption: "豆包输入法",
             showsDot: false,
-            iconLeading: 17.5,
-            textLeading: 42.5
+            columnWidth: statusColumnWidth
         )
         let inputItem = makeStatusItem(
             icon: StatusIconView(kind: .keyboard),
             valueLabel: currentInputValueLabel,
             caption: "当前输入源",
             showsDot: false,
-            iconLeading: 5,
-            textLeading: 30
+            columnWidth: statusColumnWidth
         )
         let firstDivider = makeVerticalDivider()
         let secondDivider = makeVerticalDivider()
@@ -2034,18 +2077,18 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
             content.addSubview($0)
             $0.translatesAutoresizingMaskIntoConstraints = false
         }
-        content.widthAnchor.constraint(equalToConstant: 428).isActive = true
+        content.widthAnchor.constraint(equalToConstant: launcherCardContentWidth).isActive = true
         content.heightAnchor.constraint(equalToConstant: 54).isActive = true
         NSLayoutConstraint.activate([
             runningItem.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             runningItem.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            firstDivider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 136.5),
+            firstDivider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: firstDividerX),
             firstDivider.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            installedItem.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 154),
+            installedItem.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: installedItemX),
             installedItem.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            secondDivider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 290.5),
+            secondDivider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: secondDividerX),
             secondDivider.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            inputItem.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 308),
+            inputItem.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: inputItemX),
             inputItem.centerYAnchor.constraint(equalTo: content.centerYAnchor)
         ])
         return content
@@ -2056,11 +2099,10 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         valueLabel: NSTextField,
         caption: String,
         showsDot: Bool,
-        iconLeading: CGFloat,
-        textLeading: CGFloat
+        columnWidth: CGFloat
     ) -> NSView {
-        icon.widthAnchor.constraint(equalToConstant: 20).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        icon.widthAnchor.constraint(equalToConstant: designStatusIconSize).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: designStatusIconSize).isActive = true
 
         valueLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         valueLabel.textColor = .labelColor
@@ -2088,18 +2130,21 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         textStack.alignment = .leading
 
         let container = EditingDismissView()
+        let contentWidth = designStatusIconSize + designStatusIconTextGap + designStatusTextWidth
+        let iconLeading = max(0, (columnWidth - contentWidth) / 2)
+        let textLeading = iconLeading + designStatusIconSize + designStatusIconTextGap
         container.addSubview(icon)
         container.addSubview(textStack)
         icon.translatesAutoresizingMaskIntoConstraints = false
         textStack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 120),
+            container.widthAnchor.constraint(equalToConstant: columnWidth),
             container.heightAnchor.constraint(equalToConstant: 54),
             icon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: iconLeading),
             icon.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             textStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: textLeading),
             textStack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            textStack.widthAnchor.constraint(equalToConstant: 78)
+            textStack.widthAnchor.constraint(equalToConstant: designStatusTextWidth)
         ])
         return container
     }
@@ -2111,28 +2156,33 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
 
         let titleLabel = NSTextField(labelWithString: "转发延迟")
         titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        titleLabel.widthAnchor.constraint(equalToConstant: 58).isActive = true
+        titleLabel.widthAnchor.constraint(equalToConstant: 60).isActive = true
 
         let detailLabel = NSTextField(labelWithString: "切换到豆包输入法")
-        detailLabel.font = .systemFont(ofSize: 10)
+        detailLabel.font = designSettingsAuxiliaryFont
         detailLabel.textColor = designSecondaryTextColor
         detailLabel.lineBreakMode = .byClipping
+        configureInlineTimingLabel(detailLabel)
         detailLabel.setContentHuggingPriority(.required, for: .horizontal)
         detailLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let valueView = makeTimingValueEditor(textField: forwardDelayTextField, stepper: forwardDelayStepper)
-        valueView.widthAnchor.constraint(equalToConstant: 78).isActive = true
+        let valueView = makeTimingValueEditor(
+            textField: forwardDelayTextField,
+            stepper: forwardDelayStepper,
+            unitFont: detailLabel.font ?? designSettingsAuxiliaryFont,
+            unitColor: detailLabel.textColor ?? designSecondaryTextColor
+        )
 
         let suffixLabel = NSTextField(labelWithString: "后触发语音输入")
-        suffixLabel.font = .systemFont(ofSize: 11.5)
-        suffixLabel.textColor = NSColor.labelColor.withAlphaComponent(0.54)
+        suffixLabel.font = detailLabel.font
+        suffixLabel.textColor = detailLabel.textColor
+        configureInlineTimingLabel(suffixLabel)
 
         let sentence = NSStackView(views: [detailLabel, valueView, suffixLabel])
         sentence.orientation = .horizontal
-        sentence.spacing = 3
+        sentence.spacing = designInlineControlGap
         sentence.alignment = .centerY
         sentence.distribution = .fill
-        sentence.widthAnchor.constraint(equalToConstant: 278).isActive = true
 
         let row = EditingDismissView()
         row.addSubview(icon)
@@ -2141,17 +2191,30 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         icon.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         sentence.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalToConstant: 428).isActive = true
+        row.widthAnchor.constraint(equalToConstant: launcherCardContentWidth).isActive = true
         row.heightAnchor.constraint(equalToConstant: 39).isActive = true
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             icon.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            titleLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 30),
+            titleLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 29),
             titleLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            sentence.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 150),
+            sentence.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 115),
             sentence.centerYAnchor.constraint(equalTo: row.centerYAnchor)
         ])
         return row
+    }
+
+    private func configureInlineTimingLabel(_ label: NSTextField) {
+        let centeredCell = CenteredTextFieldCell(textCell: label.stringValue)
+        centeredCell.font = label.font
+        centeredCell.textColor = label.textColor
+        centeredCell.isEditable = false
+        centeredCell.isSelectable = false
+        centeredCell.lineBreakMode = label.lineBreakMode
+        label.cell = centeredCell
+        label.isBordered = false
+        label.drawsBackground = false
+        label.heightAnchor.constraint(equalToConstant: 25).isActive = true
     }
 
     private func makeShortcutRow(
@@ -2172,12 +2235,12 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         titleLabel.widthAnchor.constraint(equalToConstant: 60).isActive = true
 
         let prefixLabel = NSTextField(labelWithString: prefix)
-        prefixLabel.font = .systemFont(ofSize: 9.5)
+        prefixLabel.font = designSettingsAuxiliaryFont
         prefixLabel.textColor = designSecondaryTextColor
         prefixLabel.widthAnchor.constraint(equalToConstant: 20).isActive = true
 
         let suffixLabel = NSTextField(labelWithString: suffix)
-        suffixLabel.font = .systemFont(ofSize: 9.5)
+        suffixLabel.font = designSettingsAuxiliaryFont
         suffixLabel.textColor = designSecondaryTextColor
         suffixLabel.lineBreakMode = .byTruncatingTail
         suffixLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -2188,18 +2251,18 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
             row.addSubview($0)
             $0.translatesAutoresizingMaskIntoConstraints = false
         }
-        row.widthAnchor.constraint(equalToConstant: 430).isActive = true
+        row.widthAnchor.constraint(equalToConstant: launcherShortcutContentWidth).isActive = true
         row.heightAnchor.constraint(equalToConstant: 35).isActive = true
         var constraints: [NSLayoutConstraint] = [
             icon.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             icon.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             titleLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 29),
             titleLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            prefixLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 152),
+            prefixLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 115),
             prefixLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            button.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 175),
+            button.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 138),
             button.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            suffixLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 228),
+            suffixLabel.leadingAnchor.constraint(equalTo: button.trailingAnchor, constant: designInlineControlGap),
             suffixLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor)
         ]
         if let timingView {
@@ -2207,19 +2270,21 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
             timingView.widthAnchor.constraint(equalToConstant: timingWidth).isActive = true
             row.addSubview(timingView)
             constraints.append(contentsOf: [
-                suffixLabel.widthAnchor.constraint(equalToConstant: 120),
-                timingView.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 351),
+                timingView.leadingAnchor.constraint(equalTo: suffixLabel.trailingAnchor, constant: designInlineControlGap),
                 timingView.centerYAnchor.constraint(equalTo: row.centerYAnchor)
             ])
-        } else {
-            constraints.append(suffixLabel.widthAnchor.constraint(equalToConstant: 140))
         }
         NSLayoutConstraint.activate(constraints)
         return row
     }
 
     private func makeTimingControl(title _: String, textField: NSTextField, stepper: NSStepper) -> NSView {
-        makeTimingValueEditor(textField: textField, stepper: stepper)
+        makeTimingValueEditor(
+            textField: textField,
+            stepper: stepper,
+            unitFont: designSettingsAuxiliaryFont,
+            unitColor: designSecondaryTextColor
+        )
     }
 
     private func makeEmptyTimingPlaceholder() -> NSView {
@@ -2229,7 +2294,12 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         return placeholder
     }
 
-    private func makeTimingValueEditor(textField: NSTextField, stepper: NSStepper) -> NSView {
+    private func makeTimingValueEditor(
+        textField: NSTextField,
+        stepper: NSStepper,
+        unitFont: NSFont = .systemFont(ofSize: 12),
+        unitColor: NSColor = NSColor.labelColor.withAlphaComponent(0.52)
+    ) -> NSView {
         textField.widthAnchor.constraint(equalToConstant: 36).isActive = true
         textField.heightAnchor.constraint(equalToConstant: 25).isActive = true
         stepper.widthAnchor.constraint(equalToConstant: 14).isActive = true
@@ -2238,8 +2308,8 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         stepper.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let unitLabel = NSTextField(labelWithString: "ms")
-        unitLabel.font = .systemFont(ofSize: 12)
-        unitLabel.textColor = NSColor.labelColor.withAlphaComponent(0.52)
+        unitLabel.font = unitFont
+        unitLabel.textColor = unitColor
 
         let row = NSStackView(views: [textField, stepper, unitLabel])
         row.orientation = .horizontal
@@ -2265,7 +2335,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         divider.wantsLayer = true
         divider.layer?.backgroundColor = designDividerColor.cgColor
         divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        divider.widthAnchor.constraint(equalToConstant: 430).isActive = true
+        divider.widthAnchor.constraint(equalToConstant: launcherShortcutContentWidth).isActive = true
         return divider
     }
 
@@ -2957,7 +3027,7 @@ private final class ShortcutSelectButton: NSButton {
         self.title = title
         isBordered = false
         wantsLayer = true
-        font = .systemFont(ofSize: 15, weight: .medium)
+        font = .systemFont(ofSize: 10, weight: .medium)
     }
 
     @available(*, unavailable)
@@ -2984,7 +3054,7 @@ private final class ShortcutSelectButton: NSButton {
         path.stroke()
 
         let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+            .font: font ?? NSFont.systemFont(ofSize: 10, weight: .medium),
             .foregroundColor: NSColor.black.withAlphaComponent(0.86)
         ]
         let displayTitle = title.count > 5 ? String(title.prefix(5)) : title
