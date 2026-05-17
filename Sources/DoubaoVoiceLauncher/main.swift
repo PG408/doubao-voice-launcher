@@ -1,6 +1,8 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import CoreAudio
+import Darwin
 import Foundation
 import OSLog
 
@@ -33,13 +35,21 @@ private enum FileDebugLog {
         .appendingPathComponent("Library/Logs/DoubaoVoiceLauncher", isDirectory: true)
     static let fileURL = directoryURL.appendingPathComponent("DoubaoVoiceLauncher.log")
     private static let queue = DispatchQueue(label: "com.local.doubao.voice-launcher.file-log")
+    private static let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     static func record(level: String, category: String, message: String) {
+        let timestampDate = Date()
+        let uptime = ProcessInfo.processInfo.systemUptime
         queue.async {
             do {
                 try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-                let timestamp = ISO8601DateFormatter().string(from: Date())
-                let line = "\(timestamp) [\(level)] [\(category)] \(message)\n"
+                let timestamp = timestampFormatter.string(from: timestampDate)
+                let uptimeText = String(format: "%.6f", uptime)
+                let line = "\(timestamp) uptime=\(uptimeText) [\(level)] [\(category)] \(message)\n"
                 guard let data = line.data(using: .utf8) else {
                     return
                 }
@@ -102,6 +112,11 @@ private struct Shortcut {
 private let forwardedShortcutResumeDelay: TimeInterval = 0.20
 private let inputSourcePollInterval: TimeInterval = 0.01
 private let inputSourcePollTimeout: TimeInterval = 0.35
+private let voiceActivationProbeDelays: [TimeInterval] = [0.35, 0.25, 0.15]
+private let voiceActivationRetryResetDelay: TimeInterval = 0.10
+private let doubaoImeExecutablePath = "/Library/Input Methods/DoubaoIme.app/Contents/MacOS/DoubaoIme"
+private let doubaoImeBundleID = "com.bytedance.inputmethod.doubaoime"
+private let processPathBufferSize = 4_096
 
 private enum ShortcutRole {
     case hold
@@ -112,6 +127,15 @@ private enum ShortcutRole {
 private enum VoiceSessionKind {
     case doubleTap
     case singleTap
+}
+
+private struct PendingVoiceActivation {
+    let id: Int
+    let shortcut: Shortcut
+    let kind: VoiceSessionKind
+    let attempt: Int
+    let startedAt: TimeInterval
+    let shortcutIsDown: Bool
 }
 
 private struct ShortcutCandidate {
@@ -540,6 +564,213 @@ private enum AccessibilityService {
     }
 }
 
+private enum DoubaoAudioInputProbe {
+    private static var cachedProcessID: pid_t?
+    private static var cachedProcessObjectID: AudioObjectID?
+
+    static func isRunningInput() -> Bool {
+        guard let (pid, processObjectID) = doubaoProcessObjectID() else {
+            AppLog.automation.warning("Doubao audio probe could not find DoubaoIme process")
+            FileDebugLog.record(level: "WARN", category: "Automation", message: "Doubao audio probe could not find DoubaoIme process")
+            return false
+        }
+
+        var inputAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyIsRunningInput,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var isRunningInput = UInt32(0)
+        var isRunningInputSize = UInt32(MemoryLayout<UInt32>.size)
+        let inputStatus = AudioObjectGetPropertyData(
+            processObjectID,
+            &inputAddress,
+            0,
+            nil,
+            &isRunningInputSize,
+            &isRunningInput
+        )
+        guard inputStatus == noErr else {
+            clearCachedProcessObject()
+            AppLog.automation.warning("Doubao audio probe failed to query input state for pid \(pid, privacy: .public), processObjectID \(processObjectID, privacy: .public), status \(inputStatus, privacy: .public)")
+            FileDebugLog.record(level: "WARN", category: "Automation", message: "Doubao audio probe failed to query input state for pid \(pid), processObjectID \(processObjectID), status \(inputStatus)")
+            return false
+        }
+
+        AppLog.automation.info("Doubao audio probe pid \(pid, privacy: .public), processObjectID \(processObjectID, privacy: .public), runningInput \(isRunningInput, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Doubao audio probe pid \(pid), processObjectID \(processObjectID), runningInput \(isRunningInput)")
+        return isRunningInput == 1
+    }
+
+    private static func doubaoProcessObjectID() -> (pid_t, AudioObjectID)? {
+        if let cachedProcessID, let cachedProcessObjectID {
+            return (cachedProcessID, cachedProcessObjectID)
+        }
+
+        guard let pid = doubaoProcessID() else {
+            clearCachedProcessObject()
+            return nil
+        }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var processObjectID = AudioObjectID(kAudioObjectUnknown)
+        var processObjectIDSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        var pidValue = pid
+        let pidSize = UInt32(MemoryLayout<pid_t>.size)
+        let translateStatus = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            pidSize,
+            &pidValue,
+            &processObjectIDSize,
+            &processObjectID
+        )
+        guard translateStatus == noErr, processObjectID != kAudioObjectUnknown else {
+            clearCachedProcessObject()
+            AppLog.automation.warning("Doubao audio probe failed to translate pid \(pid, privacy: .public), status \(translateStatus, privacy: .public), processObjectID \(processObjectID, privacy: .public)")
+            FileDebugLog.record(level: "WARN", category: "Automation", message: "Doubao audio probe failed to translate pid \(pid), status \(translateStatus), processObjectID \(processObjectID)")
+            return nil
+        }
+
+        cachedProcessID = pid
+        cachedProcessObjectID = processObjectID
+        AppLog.automation.info("Doubao audio probe cached pid \(pid, privacy: .public), processObjectID \(processObjectID, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Doubao audio probe cached pid \(pid), processObjectID \(processObjectID)")
+        return (pid, processObjectID)
+    }
+
+    private static func clearCachedProcessObject() {
+        cachedProcessID = nil
+        cachedProcessObjectID = nil
+    }
+
+    private static func doubaoProcessID() -> pid_t? {
+        if let runningApplicationPID = NSWorkspace.shared.runningApplications.first(where: { app in
+            app.bundleIdentifier == doubaoImeBundleID
+                || app.executableURL?.path == doubaoImeExecutablePath
+                || app.bundleURL?.path.hasSuffix("DoubaoIme.app") == true
+        })?.processIdentifier {
+            return runningApplicationPID
+        }
+
+        return processIDFromProcessList()
+    }
+
+    private static func processIDFromProcessList() -> pid_t? {
+        let requiredBytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+        guard requiredBytes > 0 else {
+            return nil
+        }
+
+        let pidCapacity = Int(requiredBytes) / MemoryLayout<pid_t>.stride
+        var pids = [pid_t](repeating: 0, count: pidCapacity)
+        let writtenBytes = pids.withUnsafeMutableBufferPointer { buffer in
+            proc_listpids(UInt32(PROC_ALL_PIDS), 0, buffer.baseAddress, requiredBytes)
+        }
+        guard writtenBytes > 0 else {
+            return nil
+        }
+
+        let pidCount = Int(writtenBytes) / MemoryLayout<pid_t>.stride
+        for pid in pids.prefix(pidCount) where pid > 0 {
+            var pathBuffer = [CChar](repeating: 0, count: processPathBufferSize)
+            let pathLength = pathBuffer.withUnsafeMutableBufferPointer { buffer in
+                proc_pidpath(pid, buffer.baseAddress, UInt32(buffer.count))
+            }
+            guard pathLength > 0 else {
+                continue
+            }
+            if String(cString: pathBuffer) == doubaoImeExecutablePath {
+                return pid
+            }
+        }
+        return nil
+    }
+}
+
+private struct VoiceActivationContextSnapshot {
+    let modifierFlagsRaw: UInt64
+    let frontmostAppName: String
+    let frontmostBundleID: String
+    let focusedRole: String
+    let focusedSubrole: String
+    let focusedEditable: Bool
+
+    var logDescription: String {
+        "modifierFlags=\(modifierFlagsRaw), frontmostApp=\(frontmostAppName), frontmostBundleID=\(frontmostBundleID), focusedRole=\(focusedRole), focusedSubrole=\(focusedSubrole), focusedEditable=\(focusedEditable)"
+    }
+}
+
+private enum VoiceActivationContextProbe {
+    private static let editableAttribute = "AXEditable" as CFString
+
+    static func capture() -> VoiceActivationContextSnapshot {
+        let flags = CGEventSource.flagsState(.combinedSessionState)
+        let frontmostApplication = NSWorkspace.shared.frontmostApplication
+        let focusedElement = focusedElementInfo()
+        return VoiceActivationContextSnapshot(
+            modifierFlagsRaw: flags.rawValue,
+            frontmostAppName: frontmostApplication?.localizedName ?? "nil",
+            frontmostBundleID: frontmostApplication?.bundleIdentifier ?? "nil",
+            focusedRole: focusedElement.role,
+            focusedSubrole: focusedElement.subrole,
+            focusedEditable: focusedElement.isEditable
+        )
+    }
+
+    private static func focusedElementInfo() -> (role: String, subrole: String, isEditable: Bool) {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        var focusedValue: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            systemWideElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        )
+        guard status == .success, let focusedValue else {
+            return ("unavailable(status=\(status.rawValue))", "nil", false)
+        }
+        guard CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
+            return ("unexpectedType(\(CFGetTypeID(focusedValue)))", "nil", false)
+        }
+
+        let focusedElement = focusedValue as! AXUIElement
+        let role = stringAttribute(focusedElement, kAXRoleAttribute as CFString) ?? "nil"
+        let subrole = stringAttribute(focusedElement, kAXSubroleAttribute as CFString) ?? "nil"
+        let editable = boolAttribute(focusedElement, editableAttribute) ?? false
+        let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox"]
+        return (role, subrole, editable || textInputRoles.contains(role))
+    }
+
+    private static func stringAttribute(_ element: AXUIElement, _ attribute: CFString) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+        if let string = value as? String {
+            return string
+        }
+        return value.map { String(describing: $0) }
+    }
+
+    private static func boolAttribute(_ element: AXUIElement, _ attribute: CFString) -> Bool? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+        if let bool = value as? Bool {
+            return bool
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+        return nil
+    }
+}
+
 private enum ShortcutSender {
     private static let syntheticEventMarker: Int64 = 0x44424F494D45
 
@@ -633,6 +864,12 @@ private final class RightControlAutomation {
     private var longPressWorkItem: DispatchWorkItem?
     private var didTriggerLongPress = false
     private var resumeEventTapWorkItem: DispatchWorkItem?
+    private var restoreInputSourceWorkItem: DispatchWorkItem?
+    private var voiceActivationProbeWorkItem: DispatchWorkItem?
+    private var sessionStopWorkItem: DispatchWorkItem?
+    private var preparingActivationID: Int?
+    private var pendingActivation: PendingVoiceActivation?
+    private var activationSequence = 0
     private var isForwardingShortcut = false
     private var activeShortcut: Shortcut?
     private var sessionShortcut: Shortcut?
@@ -747,8 +984,23 @@ private final class RightControlAutomation {
         FileDebugLog.record(level: "INFO", category: "Automation", message: "Stop keyboard automation requested")
         resumeEventTapWorkItem?.cancel()
         resumeEventTapWorkItem = nil
+        restoreInputSourceWorkItem?.cancel()
+        restoreInputSourceWorkItem = nil
+        sessionStopWorkItem?.cancel()
+        sessionStopWorkItem = nil
         longPressWorkItem?.cancel()
         longPressWorkItem = nil
+        voiceActivationProbeWorkItem?.cancel()
+        voiceActivationProbeWorkItem = nil
+        preparingActivationID = nil
+        if let pendingActivation {
+            if pendingActivation.shortcutIsDown {
+                forwardShortcutEvent {
+                    ShortcutSender.keyUp(shortcut: pendingActivation.shortcut)
+                }
+            }
+            self.pendingActivation = nil
+        }
         if sessionActive {
             if let shortcut = sessionShortcut {
                 ShortcutSender.keyUp(shortcut: shortcut)
@@ -843,21 +1095,14 @@ private final class RightControlAutomation {
         guard sessionActive, sessionKind == .doubleTap else {
             return Unmanaged.passUnretained(event)
         }
+        guard sessionStopWorkItem == nil else {
+            return Unmanaged.passUnretained(event)
+        }
 
         AppLog.automation.info("Detected regular key down while no-hold session is active; scheduling restore")
         FileDebugLog.record(level: "INFO", category: "Automation", message: "Detected regular key down while no-hold session is active; scheduling restore")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            guard let shortcut = self.sessionShortcut else {
-                return
-            }
-            self.forwardShortcutEvent {
-                ShortcutSender.keyUp(shortcut: shortcut)
-            }
-            _ = self.inputSourceService.restorePrevious()
-            self.sessionActive = false
-            self.sessionKind = nil
-            self.sessionShortcut = nil
-            self.onStatus?("检测到按键结束语音输入，已恢复原输入法。")
+        if let shortcut = sessionShortcut {
+            scheduleNoHoldStop(shortcut: shortcut, delay: 0.25, message: "检测到按键结束语音输入，已恢复原输入法。")
         }
         return Unmanaged.passUnretained(event)
     }
@@ -867,6 +1112,14 @@ private final class RightControlAutomation {
     }
 
     private func handleTriggerDown(shortcut: Shortcut, supportsLongPress: Bool, supportsDoubleTap: Bool, supportsSingleTap: Bool) {
+        if isShortcutTransitionBlocked {
+            let reason = shortcutTransitionBlockReason
+            AppLog.automation.info("Shortcut trigger down ignored because \(reason, privacy: .public)")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Shortcut trigger down ignored because \(reason)")
+            onStatus?("正在处理上一轮快捷键操作。")
+            return
+        }
+
         isTriggerDown = true
         didTriggerLongPress = false
         activeShortcut = shortcut
@@ -881,7 +1134,7 @@ private final class RightControlAutomation {
         if sessionActive {
             AppLog.automation.info("Shortcut pressed while no-hold session is active")
             FileDebugLog.record(level: "INFO", category: "Automation", message: "Shortcut pressed while no-hold session is active")
-            onStatus?("检测到快捷键按下，将结束双击模式语音输入。")
+            onStatus?("检测到快捷键按下，将结束当前语音输入。")
             return
         }
 
@@ -934,6 +1187,15 @@ private final class RightControlAutomation {
         let supportsSingleTap = activeSupportsSingleTap
         AppLog.automation.info("Shortcut trigger up: \(shortcut.logDescription, privacy: .public), didLongPress=\(self.didTriggerLongPress, privacy: .public), sessionActive=\(self.sessionActive, privacy: .public)")
         FileDebugLog.record(level: "INFO", category: "Automation", message: "Shortcut trigger up: \(shortcut.logDescription), didLongPress=\(didTriggerLongPress), sessionActive=\(sessionActive)")
+        defer {
+            resetActiveTrigger()
+        }
+
+        if preparingActivationID != nil || pendingActivation != nil {
+            AppLog.automation.info("Trigger up ignored because voice activation is pending")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Trigger up ignored because voice activation is pending")
+            return
+        }
 
         if didTriggerLongPress {
             forwardShortcutEvent {
@@ -941,7 +1203,6 @@ private final class RightControlAutomation {
             }
             didTriggerLongPress = false
             sessionActive = false
-            resetActiveTrigger()
             AppLog.automation.info("Long press flow ended; restoring previous input source")
             FileDebugLog.record(level: "INFO", category: "Automation", message: "Long press flow ended; restoring previous input source")
             restoreAfterDelay(message: "长按模式结束，已恢复原输入法。", delay: 0.45)
@@ -955,20 +1216,8 @@ private final class RightControlAutomation {
                 onStatus?("切换到豆包输入法失败。")
                 return
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                let endingShortcut = self.sessionShortcut ?? shortcut
-                self.forwardShortcutEvent {
-                    ShortcutSender.keyUp(shortcut: endingShortcut)
-                }
-                self.sessionActive = false
-                self.sessionKind = nil
-                self.sessionShortcut = nil
-                AppLog.automation.info("No-hold flow stopped by shortcut; restoring previous input source")
-                FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold flow stopped by shortcut; restoring previous input source")
-                self.restoreAfterDelay(message: "检测到快捷键单击结束双击模式语音输入，已恢复原输入法。", delay: 0.45)
-            }
+            scheduleNoHoldStop(shortcut: sessionShortcut ?? shortcut, delay: 0.08, message: "检测到快捷键单击结束语音输入，已恢复原输入法。")
             lastShortTapUpAt = 0
-            resetActiveTrigger()
             return
         }
 
@@ -979,29 +1228,13 @@ private final class RightControlAutomation {
                 onStatus?("切换到豆包输入法失败。")
                 return
             }
-            waitForDoubaoInputSource {
-                self.forwardShortcutEvent {
-                    ShortcutSender.keyDown(shortcut: shortcut)
-                }
-                self.sessionActive = true
-                self.sessionKind = .singleTap
-                self.sessionShortcut = shortcut
-                AppLog.automation.info("No-hold flow started by single tap with forwarded key down")
-                FileDebugLog.record(
-                    level: "INFO",
-                    category: "Automation",
-                    message: "No-hold flow started by single tap with forwarded key down"
-                )
-                self.onStatus?("检测到单击模式快捷键，已切到豆包并保持语音输入。")
-            }
+            prepareNoHoldActivation(shortcut: shortcut, kind: .singleTap)
             lastShortTapUpAt = 0
-            resetActiveTrigger()
             return
         }
 
         guard supportsDoubleTap else {
             AppLog.automation.debug("Trigger up ignored because active shortcut does not support double-tap flow")
-            resetActiveTrigger()
             return
         }
 
@@ -1012,31 +1245,309 @@ private final class RightControlAutomation {
                 onStatus?("切换到豆包输入法失败。")
                 return
             }
-            waitForDoubaoInputSource {
-                self.forwardShortcutEvent {
-                    ShortcutSender.keyDown(shortcut: shortcut)
-                }
-                self.sessionActive = true
-                self.sessionKind = .doubleTap
-                self.sessionShortcut = shortcut
-                AppLog.automation.info("No-hold flow started by double tap with forwarded key down")
-                FileDebugLog.record(
-                    level: "INFO",
-                    category: "Automation",
-                    message: "No-hold flow started by double tap with forwarded key down"
-                )
-                self.onStatus?("检测到双击模式快捷键双击，已切到豆包并转发语音快捷键。")
-            }
+            prepareNoHoldActivation(shortcut: shortcut, kind: .doubleTap)
             lastShortTapUpAt = 0
-            resetActiveTrigger()
             return
         }
 
         lastShortTapUpAt = now
-        resetActiveTrigger()
         AppLog.automation.info("First double-tap candidate recorded")
         FileDebugLog.record(level: "INFO", category: "Automation", message: "First double-tap candidate recorded")
         onStatus?("检测到一次双击模式快捷键，等待第二次按下。")
+    }
+
+    private func prepareNoHoldActivation(shortcut: Shortcut, kind: VoiceSessionKind) {
+        activationSequence += 1
+        let preparationID = activationSequence
+        preparingActivationID = preparationID
+        waitForDoubaoInputSource(
+            waitForForwardDelay: false,
+            onTimeout: {
+                guard self.preparingActivationID == preparationID else {
+                    return
+                }
+                self.preparingActivationID = nil
+            },
+            onReady: {
+                guard self.preparingActivationID == preparationID else {
+                    return
+                }
+                self.schedulePreflightResetAndActivation(
+                    preparationID: preparationID,
+                    shortcut: shortcut,
+                    kind: kind
+                )
+            }
+        )
+    }
+
+    private func schedulePreflightResetAndActivation(
+        preparationID: Int,
+        shortcut: Shortcut,
+        kind: VoiceSessionKind
+    ) {
+        let snapshot = VoiceActivationContextProbe.capture()
+        AppLog.automation.info("No-hold activation context before preflight reset: \(snapshot.logDescription, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold activation context before preflight reset: \(snapshot.logDescription)")
+        AppLog.automation.info("No-hold activation preflight reset keyUp sent; waiting configured forward delay \(self.forwardDelay, privacy: .public) seconds")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold activation preflight reset keyUp sent; waiting configured forward delay \(forwardDelay) seconds")
+        forwardShortcutEvent {
+            ShortcutSender.keyUp(shortcut: shortcut)
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.preparingActivationID == preparationID else {
+                return
+            }
+            guard self.inputSourceService.currentSourceID() == doubaoInputSourceID else {
+                self.preparingActivationID = nil
+                AppLog.automation.warning("No-hold activation preflight stopped because Doubao input source is no longer active")
+                FileDebugLog.record(level: "WARN", category: "Automation", message: "No-hold activation preflight stopped because Doubao input source is no longer active")
+                self.onStatus?("豆包输入法状态变化，已取消语音启动。")
+                return
+            }
+            self.preparingActivationID = nil
+            AppLog.automation.info("No-hold activation preflight reset delay finished; sending attempt 1 keyDown")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold activation preflight reset delay finished; sending attempt 1 keyDown")
+            self.startPendingNoHoldActivation(shortcut: shortcut, kind: kind, attempt: 1)
+        }
+        voiceActivationProbeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + forwardDelay, execute: workItem)
+    }
+
+    private func startPendingNoHoldActivation(shortcut: Shortcut, kind: VoiceSessionKind, attempt: Int) {
+        guard pendingActivation == nil, !sessionActive else {
+            AppLog.automation.info("Skip no-hold activation because another voice session is already active")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Skip no-hold activation because another voice session is already active")
+            return
+        }
+        activationSequence += 1
+        let pending = PendingVoiceActivation(
+            id: activationSequence,
+            shortcut: shortcut,
+            kind: kind,
+            attempt: attempt,
+            startedAt: ProcessInfo.processInfo.systemUptime,
+            shortcutIsDown: true
+        )
+        pendingActivation = pending
+        forwardShortcutEvent {
+            ShortcutSender.keyDown(shortcut: shortcut)
+        }
+        AppLog.automation.info("No-hold activation pending after forwarded keyDown, attempt \(attempt, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold activation pending after forwarded keyDown, attempt \(attempt)")
+        scheduleVoiceActivationProbe(id: pending.id, delay: voiceActivationProbeDelays[0], probeIndex: 0)
+    }
+
+    private func scheduleVoiceActivationProbe(id: Int, delay: TimeInterval, probeIndex: Int) {
+        voiceActivationProbeWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.runVoiceActivationProbe(id: id, probeIndex: probeIndex)
+        }
+        voiceActivationProbeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func runVoiceActivationProbe(id: Int, probeIndex: Int) {
+        guard let pending = pendingActivation, pending.id == id else {
+            return
+        }
+
+        if inputSourceService.currentSourceID() != doubaoInputSourceID {
+            AppLog.automation.warning("Voice activation probe stopped because Doubao input source is no longer active")
+            FileDebugLog.record(level: "WARN", category: "Automation", message: "Voice activation probe stopped because Doubao input source is no longer active")
+            failPendingActivation(pending, message: "豆包输入法状态变化，已取消语音启动。")
+            return
+        }
+
+        let elapsed = ProcessInfo.processInfo.systemUptime - pending.startedAt
+        let probeNumber = probeIndex + 1
+        let probeCount = voiceActivationProbeDelays.count
+        if DoubaoAudioInputProbe.isRunningInput() {
+            completePendingActivation(pending, elapsed: elapsed, probeNumber: probeNumber, probeCount: probeCount)
+            return
+        }
+
+        handleVoiceActivationProbeMiss(
+            pending,
+            probeIndex: probeIndex,
+            elapsed: elapsed,
+            probeNumber: probeNumber,
+            probeCount: probeCount
+        )
+    }
+
+    private func completePendingActivation(
+        _ pending: PendingVoiceActivation,
+        elapsed: TimeInterval,
+        probeNumber: Int,
+        probeCount: Int
+    ) {
+        pendingActivation = nil
+        voiceActivationProbeWorkItem?.cancel()
+        voiceActivationProbeWorkItem = nil
+        sessionActive = true
+        sessionKind = pending.kind
+        sessionShortcut = pending.shortcut
+        AppLog.automation.info("No-hold activation confirmed after \(elapsed, privacy: .public) seconds, attempt \(pending.attempt, privacy: .public), probe \(probeNumber, privacy: .public)/\(probeCount, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold activation confirmed after \(elapsed) seconds, attempt \(pending.attempt), probe \(probeNumber)/\(probeCount)")
+        switch pending.kind {
+        case .singleTap:
+            onStatus?("检测到单击模式快捷键，已确认豆包语音输入启动。")
+        case .doubleTap:
+            onStatus?("检测到双击模式快捷键，已确认豆包语音输入启动。")
+        }
+    }
+
+    private func handleVoiceActivationProbeMiss(
+        _ pending: PendingVoiceActivation,
+        probeIndex: Int,
+        elapsed: TimeInterval,
+        probeNumber: Int,
+        probeCount: Int
+    ) {
+        let nextProbeIndex = probeIndex + 1
+        if nextProbeIndex < voiceActivationProbeDelays.count {
+            let nextDelay = voiceActivationProbeDelays[nextProbeIndex]
+            AppLog.automation.info("No-hold activation probe \(probeNumber, privacy: .public)/\(probeCount, privacy: .public) missed after \(elapsed, privacy: .public) seconds, attempt \(pending.attempt, privacy: .public); keeping keyDown and scheduling next probe in \(nextDelay, privacy: .public) seconds")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold activation probe \(probeNumber)/\(probeCount) missed after \(elapsed) seconds, attempt \(pending.attempt); keeping keyDown and scheduling next probe in \(nextDelay) seconds")
+            onStatus?("豆包语音输入尚未启动，继续保持快捷键并最终确认。")
+            scheduleVoiceActivationProbe(id: pending.id, delay: nextDelay, probeIndex: nextProbeIndex)
+            return
+        }
+
+        AppLog.automation.warning("No-hold activation probe \(probeNumber, privacy: .public)/\(probeCount, privacy: .public) timed out after \(elapsed, privacy: .public) seconds, attempt \(pending.attempt, privacy: .public)")
+        FileDebugLog.record(level: "WARN", category: "Automation", message: "No-hold activation probe \(probeNumber)/\(probeCount) timed out after \(elapsed) seconds, attempt \(pending.attempt)")
+
+        if pending.attempt == 1 {
+            scheduleNoHoldActivationRetry(from: pending)
+            return
+        }
+
+        failPendingActivation(pending, message: "豆包语音输入未启动，已恢复原输入法，可再次单击重试。")
+    }
+
+    private func scheduleNoHoldActivationRetry(from pending: PendingVoiceActivation) {
+        guard pendingActivation?.id == pending.id else {
+            return
+        }
+        activationSequence += 1
+        let retryID = activationSequence
+        let released = PendingVoiceActivation(
+            id: retryID,
+            shortcut: pending.shortcut,
+            kind: pending.kind,
+            attempt: 2,
+            startedAt: ProcessInfo.processInfo.systemUptime,
+            shortcutIsDown: false
+        )
+        pendingActivation = released
+        voiceActivationProbeWorkItem?.cancel()
+        AppLog.automation.warning("No-hold activation attempt 1 failed; sending keyUp, waiting retry reset \(voiceActivationRetryResetDelay, privacy: .public) seconds, then retrying keyDown")
+        FileDebugLog.record(level: "WARN", category: "Automation", message: "No-hold activation attempt 1 failed; sending keyUp, waiting retry reset \(voiceActivationRetryResetDelay) seconds, then retrying keyDown")
+        onStatus?("豆包语音输入未启动，正在释放并重新发送快捷键。")
+        forwardShortcutEvent {
+            ShortcutSender.keyUp(shortcut: pending.shortcut)
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.sendNoHoldActivationRetry(id: retryID)
+        }
+        voiceActivationProbeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + voiceActivationRetryResetDelay, execute: workItem)
+    }
+
+    private func sendNoHoldActivationRetry(id: Int) {
+        guard let released = pendingActivation, released.id == id else {
+            return
+        }
+
+        if inputSourceService.currentSourceID() != doubaoInputSourceID {
+            AppLog.automation.warning("No-hold activation retry stopped because Doubao input source is no longer active")
+            FileDebugLog.record(level: "WARN", category: "Automation", message: "No-hold activation retry stopped because Doubao input source is no longer active")
+            failPendingActivation(released, message: "豆包输入法状态变化，已取消语音启动。")
+            return
+        }
+
+        AppLog.automation.warning("No-hold activation attempt 2 started with a fresh key down after reset")
+        FileDebugLog.record(level: "WARN", category: "Automation", message: "No-hold activation attempt 2 started with a fresh key down after reset")
+        pendingActivation = nil
+        startPendingNoHoldActivation(shortcut: released.shortcut, kind: released.kind, attempt: 2)
+        onStatus?("已重新发送快捷键，正在确认豆包语音输入是否启动。")
+    }
+
+    private func failPendingActivation(_ pending: PendingVoiceActivation, message: String) {
+        guard pendingActivation?.id == pending.id else {
+            return
+        }
+        voiceActivationProbeWorkItem?.cancel()
+        voiceActivationProbeWorkItem = nil
+        pendingActivation = nil
+        sessionActive = false
+        sessionKind = nil
+        sessionShortcut = nil
+        isTriggerDown = false
+        didTriggerLongPress = false
+        longPressWorkItem?.cancel()
+        longPressWorkItem = nil
+        lastShortTapUpAt = 0
+        resetActiveTrigger()
+        if pending.shortcutIsDown {
+            forwardShortcutEvent {
+                ShortcutSender.keyUp(shortcut: pending.shortcut)
+            }
+        }
+        restoreAfterDelay(message: message, delay: 0.10, warningContext: "No-hold activation failed; restored previous input source")
+    }
+
+    private var isShortcutTransitionBlocked: Bool {
+        preparingActivationID != nil
+            || pendingActivation != nil
+            || sessionStopWorkItem != nil
+            || restoreInputSourceWorkItem != nil
+    }
+
+    private var shortcutTransitionBlockReason: String {
+        var reasons: [String] = []
+        if preparingActivationID != nil {
+            reasons.append("input source preparation is pending")
+        }
+        if pendingActivation != nil {
+            reasons.append("voice activation is pending")
+        }
+        if sessionStopWorkItem != nil {
+            reasons.append("voice stop is pending")
+        }
+        if restoreInputSourceWorkItem != nil {
+            reasons.append("input source restore is pending")
+        }
+        return reasons.isEmpty ? "transition is pending" : reasons.joined(separator: ", ")
+    }
+
+    private func scheduleNoHoldStop(shortcut: Shortcut, delay: TimeInterval, message: String) {
+        sessionStopWorkItem?.cancel()
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem { [weak self] in
+            guard let self, let currentWorkItem = workItem, !currentWorkItem.isCancelled else {
+                return
+            }
+            if self.sessionStopWorkItem === currentWorkItem {
+                self.sessionStopWorkItem = nil
+            }
+            self.forwardShortcutEvent {
+                ShortcutSender.keyUp(shortcut: shortcut)
+            }
+            self.sessionActive = false
+            self.sessionKind = nil
+            self.sessionShortcut = nil
+            AppLog.automation.info("No-hold flow stopped by shortcut; restoring previous input source")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold flow stopped by shortcut; restoring previous input source")
+            self.restoreAfterDelay(message: message, delay: 0.45)
+        }
+        sessionStopWorkItem = workItem
+        if let workItem {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
     }
 
     private func forwardShortcutEvent(resumeDelay: TimeInterval = forwardedShortcutResumeDelay, _ send: () -> Void) {
@@ -1061,12 +1572,29 @@ private final class RightControlAutomation {
         DispatchQueue.main.asyncAfter(deadline: .now() + resumeDelay, execute: workItem)
     }
 
-    private func restoreAfterDelay(message: String, delay: TimeInterval) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+    private func restoreAfterDelay(message: String, delay: TimeInterval, warningContext: String? = nil) {
+        restoreInputSourceWorkItem?.cancel()
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem { [weak self] in
+            guard let self, let currentWorkItem = workItem, !currentWorkItem.isCancelled else {
+                return
+            }
+            if self.restoreInputSourceWorkItem === currentWorkItem {
+                self.restoreInputSourceWorkItem = nil
+            }
             let restored = self.inputSourceService.restorePrevious()
-            AppLog.automation.info("Restore after delay finished: \(restored, privacy: .public)")
-            FileDebugLog.record(level: "INFO", category: "Automation", message: "Restore after delay finished: \(restored)")
+            if let warningContext {
+                AppLog.automation.warning("\(warningContext, privacy: .public): \(restored, privacy: .public)")
+                FileDebugLog.record(level: "WARN", category: "Automation", message: "\(warningContext): \(restored)")
+            } else {
+                AppLog.automation.info("Restore after delay finished: \(restored, privacy: .public)")
+                FileDebugLog.record(level: "INFO", category: "Automation", message: "Restore after delay finished: \(restored)")
+            }
             self.onStatus?(message)
+        }
+        restoreInputSourceWorkItem = workItem
+        if let workItem {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
         }
     }
 
@@ -1075,18 +1603,27 @@ private final class RightControlAutomation {
         activeSupportsLongPress = false
         activeSupportsDoubleTap = false
         activeSupportsSingleTap = false
+        triggerDownAt = 0
     }
 
     private func waitForDoubaoInputSource(
         timeout: TimeInterval = inputSourcePollTimeout,
         startedAt: TimeInterval = ProcessInfo.processInfo.systemUptime,
+        waitForForwardDelay: Bool = true,
+        onTimeout: (() -> Void)? = nil,
         onReady: @escaping () -> Void
     ) {
         if inputSourceService.currentSourceID() == doubaoInputSourceID {
             let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
-            AppLog.automation.info("Doubao input source confirmed after \(elapsed, privacy: .public) seconds; waiting for configured forward delay")
-            FileDebugLog.record(level: "INFO", category: "Automation", message: "Doubao input source confirmed after \(elapsed) seconds; waiting \(forwardDelay) seconds before forwarding shortcut")
-            DispatchQueue.main.asyncAfter(deadline: .now() + forwardDelay) {
+            if waitForForwardDelay {
+                AppLog.automation.info("Doubao input source confirmed after \(elapsed, privacy: .public) seconds; waiting for configured forward delay")
+                FileDebugLog.record(level: "INFO", category: "Automation", message: "Doubao input source confirmed after \(elapsed) seconds; waiting \(forwardDelay) seconds before forwarding shortcut")
+                DispatchQueue.main.asyncAfter(deadline: .now() + forwardDelay) {
+                    onReady()
+                }
+            } else {
+                AppLog.automation.info("Doubao input source confirmed after \(elapsed, privacy: .public) seconds; continuing without built-in forward delay")
+                FileDebugLog.record(level: "INFO", category: "Automation", message: "Doubao input source confirmed after \(elapsed) seconds; continuing without built-in forward delay")
                 onReady()
             }
             return
@@ -1097,11 +1634,18 @@ private final class RightControlAutomation {
             AppLog.automation.error("Timed out waiting for Doubao input source")
             FileDebugLog.record(level: "ERROR", category: "Automation", message: "Timed out waiting for Doubao input source after \(elapsed) seconds")
             onStatus?("已请求切换到豆包输入法，但未确认切换完成。")
+            onTimeout?()
             return
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + inputSourcePollInterval) {
-            self.waitForDoubaoInputSource(timeout: timeout, startedAt: startedAt, onReady: onReady)
+            self.waitForDoubaoInputSource(
+                timeout: timeout,
+                startedAt: startedAt,
+                waitForForwardDelay: waitForForwardDelay,
+                onTimeout: onTimeout,
+                onReady: onReady
+            )
         }
     }
 
