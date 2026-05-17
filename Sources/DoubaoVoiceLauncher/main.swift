@@ -555,20 +555,6 @@ private enum AccessibilityService {
         FileDebugLog.record(level: "INFO", category: "Permissions", message: "Accessibility permission trusted: \(trusted)")
         return trusted
     }
-
-    static func canListenKeyboardEvents() -> Bool {
-        let canListen = CGPreflightListenEventAccess()
-        AppLog.permissions.info("Input monitoring permission preflight: \(canListen, privacy: .public)")
-        FileDebugLog.record(level: "INFO", category: "Permissions", message: "Input monitoring permission preflight: \(canListen)")
-        return canListen
-    }
-
-    static func requestKeyboardEventAccess() -> Bool {
-        let granted = CGRequestListenEventAccess()
-        AppLog.permissions.info("Input monitoring permission request result: \(granted, privacy: .public)")
-        FileDebugLog.record(level: "INFO", category: "Permissions", message: "Input monitoring permission request result: \(granted)")
-        return granted
-    }
 }
 
 private enum DoubaoAudioInputProbe {
@@ -842,13 +828,6 @@ private final class RightControlAutomation {
             AppLog.automation.error("Keyboard automation start failed because accessibility permission is missing")
             FileDebugLog.record(level: "ERROR", category: "Automation", message: "Keyboard automation start failed because accessibility permission is missing")
             onStatus?("后台监听需要辅助功能权限。授权后请重启本 App。")
-            return false
-        }
-
-        guard AccessibilityService.canListenKeyboardEvents() || AccessibilityService.requestKeyboardEventAccess() else {
-            AppLog.automation.error("Keyboard automation start failed because input monitoring permission is missing")
-            FileDebugLog.record(level: "ERROR", category: "Automation", message: "Keyboard automation start failed because input monitoring permission is missing")
-            onStatus?("后台监听还需要输入监控权限。请在系统设置中打开本 App 的输入监控权限后重启。")
             return false
         }
 
@@ -1883,15 +1862,11 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         accessibilityButton.target = self
         accessibilityButton.action = #selector(openAccessibilitySettings)
 
-        let inputMonitoringButton = IconActionButton(title: "输入监控", symbolName: "keyboard-clear")
-        inputMonitoringButton.target = self
-        inputMonitoringButton.action = #selector(openInputMonitoringSettings)
-
         monitorToggleButton.target = self
         monitorToggleButton.action = #selector(toggleMonitoring)
         updateMonitorToggleButton()
 
-        [openSettingsButton, accessibilityButton, inputMonitoringButton].forEach(configureSecondaryButton)
+        [openSettingsButton, accessibilityButton].forEach(configureSecondaryButton)
         configureShortcutButton(holdShortcutButton)
         configureShortcutButton(doubleTapShortcutButton)
         configureShortcutButton(singleTapShortcutButton)
@@ -1945,7 +1920,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         let shortcutCard = makeRoundedContainer(content: shortcutContent, horizontalPadding: 10, verticalPadding: 5)
         shortcutCard.heightAnchor.constraint(equalToConstant: 133).isActive = true
 
-        let secondaryButtonRow = makeBottomActionBar(buttons: [openSettingsButton, accessibilityButton, inputMonitoringButton])
+        let secondaryButtonRow = makeBottomActionBar(buttons: [openSettingsButton, accessibilityButton])
 
         let headerStack = NSStackView(views: [titleLabel, explanationLabel])
         headerStack.orientation = .vertical
@@ -2720,19 +2695,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         FileDebugLog.record(level: "INFO", category: "UI", message: "Opened accessibility settings")
         refreshStatus("请在辅助功能列表中打开 \(appDisplayName)；若已存在但无效，先移除再重新添加。")
     }
-
-    @objc private func openInputMonitoringSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") else {
-            AppLog.ui.error("Failed to build input monitoring settings URL")
-            FileDebugLog.record(level: "ERROR", category: "UI", message: "Failed to build input monitoring settings URL")
-            refreshStatus("无法打开输入监控设置。")
-            return
-        }
-        NSWorkspace.shared.open(url)
-        AppLog.ui.info("Opened input monitoring settings")
-        FileDebugLog.record(level: "INFO", category: "UI", message: "Opened input monitoring settings")
-        refreshStatus("请在输入监控列表中打开 \(appDisplayName)；若列表中没有，请用加号添加当前 app。")
-    }
 }
 
 private final class ShortcutPickerViewController: NSViewController {
@@ -3312,6 +3274,7 @@ private extension NSRect {
 
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
+    private var launcherViewController: LauncherViewController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLog.app.info("Application did finish launching")
@@ -3325,6 +3288,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: launcherWindowWidth, height: launcherWindowHeight)
         window.contentMaxSize = NSSize(width: launcherWindowWidth, height: launcherWindowHeight)
         window.title = appDisplayName
@@ -3338,9 +3302,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        self.launcherViewController = controller
         self.window = window
         AppLog.app.info("Main window is visible")
         FileDebugLog.record(level: "INFO", category: "App", message: "Main window is visible")
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            showMainWindow(reason: "reopen")
+        }
+        return true
     }
 
     private func installMainMenu() {
@@ -3360,6 +3332,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let windowMenuItem = NSMenuItem()
         windowMenuItem.title = "窗口"
         let windowMenu = NSMenu(title: "窗口")
+        let showWindowItem = NSMenuItem(
+            title: "显示设置窗口",
+            action: #selector(showSettingsWindow(_:)),
+            keyEquivalent: "0"
+        )
+        showWindowItem.target = self
+        windowMenu.addItem(showWindowItem)
         windowMenu.addItem(
             withTitle: "最小化",
             action: #selector(NSWindow.performMiniaturize(_:)),
@@ -3370,6 +3349,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showSettingsWindow(_ sender: Any?) {
+        showMainWindow(reason: "menu")
+    }
+
+    private func showMainWindow(reason: String) {
+        guard let window else {
+            AppLog.app.error("Main window reopen requested before window is available")
+            FileDebugLog.record(
+                level: "ERROR",
+                category: "App",
+                message: "Main window reopen requested before window is available reason=\(reason)"
+            )
+            return
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        AppLog.app.info("Main window reopened reason=\(reason, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "App", message: "Main window reopened reason=\(reason)")
     }
 
     private func installCenteredTitle(in window: NSWindow) {
