@@ -11,8 +11,10 @@ let package = Package(
         .executable(name: "DoubaoVoiceLauncher", targets: ["DoubaoVoiceLauncher"])
     ],
     targets: [
+        .target(name: "DoubaoVoiceLauncherCore"),
         .executableTarget(
             name: "DoubaoVoiceLauncher",
+            dependencies: ["DoubaoVoiceLauncherCore"],
             resources: [
                 .copy("Resources")
             ],
@@ -22,6 +24,10 @@ let package = Package(
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("CoreAudio")
             ]
+        ),
+        .testTarget(
+            name: "DoubaoVoiceLauncherCoreTests",
+            dependencies: ["DoubaoVoiceLauncherCore"]
         )
     ]
 )

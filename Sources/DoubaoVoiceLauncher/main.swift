@@ -3,6 +3,7 @@ import ApplicationServices
 import Carbon
 import CoreAudio
 import Darwin
+import DoubaoVoiceLauncherCore
 import Foundation
 import OSLog
 
@@ -117,6 +118,8 @@ private struct Shortcut {
 }
 
 private let forwardedShortcutResumeDelay: TimeInterval = 0.20
+private let eventTapHealthCheckInterval: TimeInterval = 2.0
+private let eventTapHealthLogInterval: TimeInterval = 30.0
 private let inputSourcePollInterval: TimeInterval = 0.01
 private let inputSourcePollTimeout: TimeInterval = 0.35
 private let voiceActivationProbeDelays: [TimeInterval] = [0.35, 0.25, 0.15]
@@ -760,6 +763,29 @@ private enum ShortcutSender {
 
 }
 
+private struct KeyboardEventSnapshot {
+    let type: CGEventType
+    let keyCode: CGKeyCode
+    let flags: CGEventFlags
+    let autorepeat: Bool
+    let isSynthetic: Bool
+
+    init(type: CGEventType, event: CGEvent) {
+        self.type = type
+        self.keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        self.flags = event.flags
+        self.autorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        self.isSynthetic = ShortcutSender.isSyntheticEvent(event)
+    }
+}
+
+private struct EventTapHealthSnapshot: Equatable {
+    let isTapEnabled: Bool
+    let isForwardingShortcut: Bool
+    let canRecreateEnabledTap: Bool
+    let action: EventTapHealthAction
+}
+
 private final class RightControlAutomation {
     private let inputSourceService: InputSourceService
     private var holdShortcut = ShortcutDefaults.loadHoldShortcut()
@@ -770,6 +796,15 @@ private final class RightControlAutomation {
     private var doubleTapMilliseconds = TimingDefaults.loadDoubleTapMilliseconds()
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var eventTapRunLoop: CFRunLoop?
+    private var eventTapThread: Thread?
+    private var eventTapHealthPolicy = EventTapHealthPolicy()
+    private var eventTapHealthCheckWorkItem: DispatchWorkItem?
+    private var eventTapGeneration = 0
+    private var lastKeyboardEventAt: TimeInterval?
+    private var lastShortcutCandidateEventAt: TimeInterval?
+    private var lastEventTapHealthLogAt: TimeInterval = 0
+    private var lastEventTapHealthSnapshot: EventTapHealthSnapshot?
     private var isTriggerDown = false
     private var triggerDownAt: TimeInterval = 0
     private var lastShortTapUpAt: TimeInterval = 0
@@ -831,37 +866,11 @@ private final class RightControlAutomation {
             return false
         }
 
-        let mask = (1 << CGEventType.flagsChanged.rawValue)
-            | (1 << CGEventType.keyDown.rawValue)
-            | (1 << CGEventType.keyUp.rawValue)
-        let callback: CGEventTapCallBack = { _, type, event, refcon in
-            guard let refcon else {
-                return Unmanaged.passUnretained(event)
-            }
-            let monitor = Unmanaged<RightControlAutomation>.fromOpaque(refcon).takeUnretainedValue()
-            return monitor.handle(type: type, event: event)
-        }
-
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(mask),
-            callback: callback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            AppLog.automation.error("Failed to create global keyboard event tap")
-            FileDebugLog.record(level: "ERROR", category: "Automation", message: "Failed to create global keyboard event tap")
-            onStatus?("无法创建全局键盘监听。请检查辅助功能权限。")
+        guard installEventTap() else {
             return false
         }
 
-        eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        if let runLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        }
-        CGEvent.tapEnable(tap: tap, enable: true)
+        startEventTapHealthChecks()
         AppLog.automation.info("Keyboard automation started with hold \(self.logDescription(for: self.holdShortcut), privacy: .public), doubleTap \(self.logDescription(for: self.doubleTapShortcut), privacy: .public), singleTap \(self.logDescription(for: self.singleTapShortcut), privacy: .public)")
         FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard automation started with hold \(logDescription(for: holdShortcut)), doubleTap \(logDescription(for: doubleTapShortcut)), singleTap \(logDescription(for: singleTapShortcut))")
         onStatus?("后台监听已开启：已选择的快捷键会自动切到豆包，结束后恢复原输入法。")
@@ -889,6 +898,7 @@ private final class RightControlAutomation {
     func stop() {
         AppLog.automation.info("Stop keyboard automation requested")
         FileDebugLog.record(level: "INFO", category: "Automation", message: "Stop keyboard automation requested")
+        stopEventTapHealthChecks()
         resumeEventTapWorkItem?.cancel()
         resumeEventTapWorkItem = nil
         restoreInputSourceWorkItem?.cancel()
@@ -921,49 +931,427 @@ private final class RightControlAutomation {
         didTriggerLongPress = false
         activeModifierKeyCodes.removeAll()
         resetActiveTrigger()
-        if let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-        }
-        if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        }
-        eventTap = nil
-        runLoopSource = nil
+        removeEventTap()
         AppLog.automation.info("Keyboard automation stopped")
         FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard automation stopped")
     }
 
-    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    private func installEventTap() -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        var installed = false
+        eventTapGeneration += 1
+        let generation = eventTapGeneration
+        AppLog.automation.info("Starting keyboard event tap thread generation \(generation, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Starting keyboard event tap thread generation \(generation)")
+        let thread = Thread { [weak self] in
+            guard let self else {
+                semaphore.signal()
+                return
+            }
+
+            installed = self.installEventTapOnCurrentThread(generation: generation)
+            semaphore.signal()
+            guard installed else {
+                return
+            }
+
+            AppLog.automation.info("Keyboard event tap run loop starting generation \(generation, privacy: .public)")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard event tap run loop starting generation \(generation)")
+            CFRunLoopRun()
+            AppLog.automation.info("Keyboard event tap run loop stopped generation \(generation, privacy: .public)")
+            FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard event tap run loop stopped generation \(generation)")
+        }
+        thread.name = "DoubaoVoiceLauncher.keyboard-event-tap"
+        eventTapThread = thread
+        thread.start()
+
+        let waitResult = semaphore.wait(timeout: .now() + 2.0)
+        if !installed {
+            eventTapThread = nil
+        }
+        AppLog.automation.info("Keyboard event tap install wait finished generation \(generation, privacy: .public), installed=\(installed, privacy: .public), timedOut=\(waitResult == .timedOut, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard event tap install wait finished generation \(generation), installed=\(installed), timedOut=\(waitResult == .timedOut)")
+        return installed
+    }
+
+    private func installEventTapOnCurrentThread(generation: Int) -> Bool {
+        let mask = (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.keyUp.rawValue)
+        AppLog.automation.info("Creating keyboard event tap generation \(generation, privacy: .public), options=listenOnly, mask=\(mask, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Creating keyboard event tap generation \(generation), options=listenOnly, mask=\(mask)")
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            guard let refcon else {
+                return Unmanaged.passUnretained(event)
+            }
+            let monitor = Unmanaged<RightControlAutomation>.fromOpaque(refcon).takeUnretainedValue()
+            let snapshot = KeyboardEventSnapshot(type: type, event: event)
+            DispatchQueue.main.async {
+                monitor.handle(snapshot)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: CGEventMask(mask),
+            callback: callback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            AppLog.automation.error("Failed to create global keyboard event tap")
+            FileDebugLog.record(level: "ERROR", category: "Automation", message: "Failed to create global keyboard event tap")
+            onStatus?("无法创建全局键盘监听。请检查辅助功能权限。")
+            return false
+        }
+
+        eventTap = tap
+        eventTapRunLoop = CFRunLoopGetCurrent()
+        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        if let runLoopSource {
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        eventTapHealthPolicy.reset()
+        lastEventTapHealthSnapshot = nil
+        lastEventTapHealthLogAt = 0
+        AppLog.automation.info("Keyboard event tap installed generation \(generation, privacy: .public), sourceCreated=\(self.runLoopSource != nil, privacy: .public), enabled=\(CGEvent.tapIsEnabled(tap: tap), privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard event tap installed generation \(generation), sourceCreated=\(self.runLoopSource != nil), enabled=\(CGEvent.tapIsEnabled(tap: tap))")
+        return true
+    }
+
+    private func removeEventTap() {
+        let tap = eventTap
+        let source = runLoopSource
+        let runLoop = eventTapRunLoop
+        let generation = eventTapGeneration
+        AppLog.automation.info("Removing keyboard event tap generation \(generation, privacy: .public), hasTap=\(tap != nil, privacy: .public), hasSource=\(source != nil, privacy: .public), hasRunLoop=\(runLoop != nil, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Removing keyboard event tap generation \(generation), hasTap=\(tap != nil), hasSource=\(source != nil), hasRunLoop=\(runLoop != nil)")
+        eventTap = nil
+        runLoopSource = nil
+        eventTapRunLoop = nil
+        eventTapThread = nil
+        lastEventTapHealthSnapshot = nil
+
+        guard let runLoop else {
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: false)
+                CFMachPortInvalidate(tap)
+            }
+            eventTapHealthPolicy.reset()
+            return
+        }
+
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) {
+            if let tap {
+                AppLog.automation.info("Invalidating keyboard event tap generation \(generation, privacy: .public)")
+                FileDebugLog.record(level: "INFO", category: "Automation", message: "Invalidating keyboard event tap generation \(generation)")
+                CGEvent.tapEnable(tap: tap, enable: false)
+                CFMachPortInvalidate(tap)
+            }
+            if let source {
+                CFRunLoopRemoveSource(runLoop, source, .commonModes)
+            }
+            CFRunLoopStop(runLoop)
+        }
+        CFRunLoopWakeUp(runLoop)
+        eventTapHealthPolicy.reset()
+    }
+
+    private func startEventTapHealthChecks() {
+        eventTapHealthCheckWorkItem?.cancel()
+        scheduleEventTapHealthCheck()
+    }
+
+    private func stopEventTapHealthChecks() {
+        eventTapHealthCheckWorkItem?.cancel()
+        eventTapHealthCheckWorkItem = nil
+        eventTapHealthPolicy.reset()
+    }
+
+    private func scheduleEventTapHealthCheck() {
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else {
+                return
+            }
+            self.verifyEventTapHealth()
+            guard self.eventTap != nil else {
+                return
+            }
+            self.scheduleEventTapHealthCheck()
+        }
+        eventTapHealthCheckWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + eventTapHealthCheckInterval, execute: workItem)
+    }
+
+    private func verifyEventTapHealth() {
+        guard let eventTap else {
+            eventTapHealthPolicy.reset()
+            return
+        }
+
+        let isTapEnabled = CGEvent.tapIsEnabled(tap: eventTap)
+        let canRecreateEnabledTap = canRenewEnabledEventTap
+        let action = eventTapHealthPolicy.nextAction(
+            isTapPresent: true,
+            isTapEnabled: isTapEnabled,
+            isForwardingShortcut: isForwardingShortcut,
+            canRecreateEnabledTap: canRecreateEnabledTap
+        )
+        logEventTapHealthIfNeeded(
+            isTapEnabled: isTapEnabled,
+            canRecreateEnabledTap: canRecreateEnabledTap,
+            action: action
+        )
+
+        switch action {
+        case .none:
+            return
+        case .reenable:
+            AppLog.automation.warning("Keyboard event tap health check found disabled tap; re-enabling")
+            FileDebugLog.record(level: "WARN", category: "Automation", message: "Keyboard event tap health check found disabled tap; re-enabling")
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+        case .recreate:
+            AppLog.automation.warning("Keyboard event tap health check is recreating tap")
+            FileDebugLog.record(level: "WARN", category: "Automation", message: "Keyboard event tap health check is recreating tap")
+            removeEventTap()
+            if installEventTap() {
+                AppLog.automation.info("Keyboard event tap recreated by health check")
+                FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard event tap recreated by health check")
+            }
+        }
+    }
+
+    private func logEventTapHealthIfNeeded(
+        isTapEnabled: Bool,
+        canRecreateEnabledTap: Bool,
+        action: EventTapHealthAction
+    ) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let snapshot = EventTapHealthSnapshot(
+            isTapEnabled: isTapEnabled,
+            isForwardingShortcut: isForwardingShortcut,
+            canRecreateEnabledTap: canRecreateEnabledTap,
+            action: action
+        )
+        let shouldLog = snapshot != lastEventTapHealthSnapshot
+            || action != .none
+            || lastEventTapHealthLogAt == 0
+            || now - lastEventTapHealthLogAt >= eventTapHealthLogInterval
+        guard shouldLog else {
+            return
+        }
+
+        lastEventTapHealthSnapshot = snapshot
+        lastEventTapHealthLogAt = now
+        let message = "Keyboard event tap health: enabled=\(isTapEnabled), forwarding=\(isForwardingShortcut), canRecreateEnabledTap=\(canRecreateEnabledTap), action=\(action), lastEventAge=\(ageDescription(since: lastKeyboardEventAt, now: now)), lastShortcutEventAge=\(ageDescription(since: lastShortcutCandidateEventAt, now: now))"
+        AppLog.automation.info("\(message, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: message)
+    }
+
+    private var canRenewEnabledEventTap: Bool {
+        !isForwardingShortcut
+            && !isTriggerDown
+            && !sessionActive
+            && preparingActivationID == nil
+            && pendingActivation == nil
+    }
+
+    private func ageDescription(since timestamp: TimeInterval?, now: TimeInterval) -> String {
+        guard let timestamp else {
+            return "never"
+        }
+        return String(format: "%.3fs", max(0, now - timestamp))
+    }
+
+    private func eventTypeDescription(_ type: CGEventType) -> String {
+        switch type {
+        case .keyDown:
+            return "keyDown"
+        case .keyUp:
+            return "keyUp"
+        case .flagsChanged:
+            return "flagsChanged"
+        case .tapDisabledByTimeout:
+            return "tapDisabledByTimeout"
+        case .tapDisabledByUserInput:
+            return "tapDisabledByUserInput"
+        default:
+            return "type=\(type.rawValue)"
+        }
+    }
+
+    private func keyName(for keyCode: CGKeyCode) -> String {
+        switch keyCode {
+        case 54:
+            return "RightCommand"
+        case 55:
+            return "LeftCommand"
+        case 56:
+            return "LeftShift"
+        case 60:
+            return "RightShift"
+        case 58:
+            return "LeftOption"
+        case 61:
+            return "RightOption"
+        case 59:
+            return "LeftControl"
+        case 62:
+            return "RightControl"
+        case 63:
+            return "Function"
+        default:
+            return "Key\(keyCode)"
+        }
+    }
+
+    private func modifierSummary(_ flags: CGEventFlags) -> String {
+        var parts: [String] = []
+        if flags.contains(.maskSecondaryFn) { parts.append("fn") }
+        if flags.contains(.maskControl) { parts.append("control") }
+        if flags.contains(.maskAlternate) { parts.append("option") }
+        if flags.contains(.maskShift) { parts.append("shift") }
+        if flags.contains(.maskCommand) { parts.append("cmd") }
+        return parts.isEmpty ? "none" : parts.joined(separator: "+")
+    }
+
+    private func keyCodesDescription(_ keyCodes: Set<CGKeyCode>) -> String {
+        guard !keyCodes.isEmpty else {
+            return "none"
+        }
+        return keyCodes.sorted().map { "\($0):\(keyName(for: $0))" }.joined(separator: ",")
+    }
+
+    private func shortcutRoles(for keyCode: CGKeyCode) -> String? {
+        var roles: [String] = []
+        if holdShortcut?.keyCodes.contains(keyCode) == true {
+            roles.append("hold")
+        }
+        if doubleTapShortcut?.keyCodes.contains(keyCode) == true {
+            roles.append("doubleTap")
+        }
+        if singleTapShortcut?.keyCodes.contains(keyCode) == true {
+            roles.append("singleTap")
+        }
+        return roles.isEmpty ? nil : roles.joined(separator: "+")
+    }
+
+    private func eventAction(for event: KeyboardEventSnapshot) -> String {
+        if event.type == .keyDown {
+            return event.autorepeat ? "repeat" : "down"
+        }
+        if event.type == .keyUp {
+            return "up"
+        }
+        if event.type == .flagsChanged,
+           let modifierFlag = ShortcutFormatter.modifierFlag(for: event.keyCode) {
+            return event.flags.contains(modifierFlag) ? "down" : "up"
+        }
+        return "changed"
+    }
+
+    private func logConfiguredShortcutEvent(
+        _ event: KeyboardEventSnapshot,
+        activeBefore: Set<CGKeyCode>,
+        activeAfter: Set<CGKeyCode>,
+        note: String? = nil
+    ) {
+        guard let roles = shortcutRoles(for: event.keyCode) else {
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        if !event.isSynthetic {
+            lastShortcutCandidateEventAt = now
+        }
+        let noteText = note.map { ", note=\($0)" } ?? ""
+        let message = String(
+            format: "Event tap received shortcut key event: type=%@ action=%@ keyCode=%hu key=%@ flags=0x%016llx mods=%@ synthetic=%@ roles=%@ activeBefore=%@ activeAfter=%@%@",
+            eventTypeDescription(event.type),
+            eventAction(for: event),
+            event.keyCode,
+            keyName(for: event.keyCode),
+            event.flags.rawValue,
+            modifierSummary(event.flags),
+            String(event.isSynthetic),
+            roles,
+            keyCodesDescription(activeBefore),
+            keyCodesDescription(activeAfter),
+            noteText
+        )
+        AppLog.automation.info("\(message, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: message)
+    }
+
+    private func handle(_ event: KeyboardEventSnapshot) {
+        let type = event.type
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if isForwardingShortcut {
                 AppLog.automation.debug("Event tap disabled while forwarding synthetic shortcut; waiting for scheduled re-enable")
-                return Unmanaged.passUnretained(event)
+                return
             }
             AppLog.automation.warning("Event tap disabled by system, re-enabling")
             FileDebugLog.record(level: "WARN", category: "Automation", message: "Event tap disabled by system, re-enabling")
             if let eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
+                eventTapHealthPolicy.reset()
             }
-            return Unmanaged.passUnretained(event)
+            return
         }
 
-        if ShortcutSender.isSyntheticEvent(event) {
-            return Unmanaged.passUnretained(event)
+        if event.isSynthetic {
+            logConfiguredShortcutEvent(
+                event,
+                activeBefore: activeModifierKeyCodes,
+                activeAfter: activeModifierKeyCodes,
+                note: "ignoredSynthetic"
+            )
+            return
         }
+
+        lastKeyboardEventAt = ProcessInfo.processInfo.systemUptime
 
         if type == .keyDown {
-            return handleKeyDown(event: event)
+            logConfiguredShortcutEvent(
+                event,
+                activeBefore: activeModifierKeyCodes,
+                activeAfter: activeModifierKeyCodes
+            )
+            handleKeyDown()
+            return
         }
 
         if type == .keyUp {
-            return handleKeyUp(event: event)
+            logConfiguredShortcutEvent(
+                event,
+                activeBefore: activeModifierKeyCodes,
+                activeAfter: activeModifierKeyCodes
+            )
+            handleKeyUp()
+            return
         }
 
         guard type == .flagsChanged else {
-            return Unmanaged.passUnretained(event)
+            return
         }
 
-        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        let keyCode = event.keyCode
+        let staleModifierKeyCodes = ModifierKeyState.staleKeyCodes(
+            activeKeyCodes: activeModifierKeyCodes,
+            currentKeyCode: keyCode,
+            activeFlagsRawValue: event.flags.rawValue
+        ) { keyCode in
+            ShortcutFormatter.modifierFlag(for: CGKeyCode(keyCode))?.rawValue
+        }
+        if !staleModifierKeyCodes.isEmpty {
+            let activeBeforeCleanup = activeModifierKeyCodes
+            activeModifierKeyCodes.subtract(staleModifierKeyCodes)
+            let message = "Cleared stale modifier key state: stale=\(keyCodesDescription(staleModifierKeyCodes)), flags=\(modifierSummary(event.flags)), activeBefore=\(keyCodesDescription(activeBeforeCleanup)), activeAfter=\(keyCodesDescription(activeModifierKeyCodes))"
+            AppLog.automation.warning("\(message, privacy: .public)")
+            FileDebugLog.record(level: "WARN", category: "Automation", message: message)
+        }
+        let activeModifierKeyCodesBefore = activeModifierKeyCodes
         if let modifierFlag = ShortcutFormatter.modifierFlag(for: keyCode) {
             if event.flags.contains(modifierFlag) {
                 activeModifierKeyCodes.insert(keyCode)
@@ -971,13 +1359,36 @@ private final class RightControlAutomation {
                 activeModifierKeyCodes.remove(keyCode)
             }
         }
+        logConfiguredShortcutEvent(
+            event,
+            activeBefore: activeModifierKeyCodesBefore,
+            activeAfter: activeModifierKeyCodes
+        )
 
         let holdKeyCodes = holdShortcut.map { Set($0.keyCodes) }
         let doubleTapKeyCodes = doubleTapShortcut.map { Set($0.keyCodes) }
         let singleTapKeyCodes = singleTapShortcut.map { Set($0.keyCodes) }
-        let supportsLongPress = holdKeyCodes.map { $0.contains(keyCode) && activeModifierKeyCodes == $0 } ?? false
-        let supportsDoubleTap = doubleTapKeyCodes.map { $0.contains(keyCode) && activeModifierKeyCodes == $0 } ?? false
-        let supportsSingleTap = singleTapKeyCodes.map { $0.contains(keyCode) && activeModifierKeyCodes == $0 } ?? false
+        let supportsLongPress = holdKeyCodes.map {
+            ShortcutMatchState.isPressed(
+                changedKeyCode: keyCode,
+                activeModifierKeyCodes: activeModifierKeyCodes,
+                shortcutKeyCodes: $0
+            )
+        } ?? false
+        let supportsDoubleTap = doubleTapKeyCodes.map {
+            ShortcutMatchState.isPressed(
+                changedKeyCode: keyCode,
+                activeModifierKeyCodes: activeModifierKeyCodes,
+                shortcutKeyCodes: $0
+            )
+        } ?? false
+        let supportsSingleTap = singleTapKeyCodes.map {
+            ShortcutMatchState.isPressed(
+                changedKeyCode: keyCode,
+                activeModifierKeyCodes: activeModifierKeyCodes,
+                shortcutKeyCodes: $0
+            )
+        } ?? false
         let shortcut = supportsSingleTap ? singleTapShortcut : (supportsDoubleTap ? doubleTapShortcut : holdShortcut)
         if let shortcut, (supportsLongPress || supportsDoubleTap || supportsSingleTap) && !isTriggerDown {
             handleTriggerDown(
@@ -986,24 +1397,26 @@ private final class RightControlAutomation {
                 supportsDoubleTap: supportsDoubleTap,
                 supportsSingleTap: supportsSingleTap
             )
-            return Unmanaged.passUnretained(event)
+            return
         }
 
         let activeKeyCodes = Set(activeShortcut?.keyCodes ?? [])
-        if isTriggerDown && activeKeyCodes.contains(keyCode) && activeModifierKeyCodes != activeKeyCodes {
+        if isTriggerDown && ShortcutMatchState.isReleased(
+            changedKeyCode: keyCode,
+            activeModifierKeyCodes: activeModifierKeyCodes,
+            shortcutKeyCodes: activeKeyCodes
+        ) {
             handleTriggerUp()
-            return Unmanaged.passUnretained(event)
+            return
         }
-
-        return Unmanaged.passUnretained(event)
     }
 
-    private func handleKeyDown(event: CGEvent) -> Unmanaged<CGEvent>? {
+    private func handleKeyDown() {
         guard sessionActive, sessionKind == .doubleTap else {
-            return Unmanaged.passUnretained(event)
+            return
         }
         guard sessionStopWorkItem == nil else {
-            return Unmanaged.passUnretained(event)
+            return
         }
 
         AppLog.automation.info("Detected regular key down while no-hold session is active; scheduling restore")
@@ -1011,11 +1424,9 @@ private final class RightControlAutomation {
         if let shortcut = sessionShortcut {
             scheduleNoHoldStop(shortcut: shortcut, delay: 0.25, message: "检测到按键结束语音输入，已恢复原输入法。")
         }
-        return Unmanaged.passUnretained(event)
     }
 
-    private func handleKeyUp(event: CGEvent) -> Unmanaged<CGEvent>? {
-        return Unmanaged.passUnretained(event)
+    private func handleKeyUp() {
     }
 
     private func handleTriggerDown(shortcut: Shortcut, supportsLongPress: Bool, supportsDoubleTap: Bool, supportsSingleTap: Bool) {
@@ -1455,22 +1866,18 @@ private final class RightControlAutomation {
     }
 
     private func forwardShortcutEvent(resumeDelay: TimeInterval = forwardedShortcutResumeDelay, _ send: () -> Void) {
-        if let eventTap {
-            AppLog.automation.debug("Temporarily disabling event tap before forwarding shortcut")
-            isForwardingShortcut = true
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-        }
+        isForwardingShortcut = true
 
         send()
 
         resumeEventTapWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
-            guard let self, let eventTap = self.eventTap else {
+            guard let self else {
                 return
             }
-            CGEvent.tapEnable(tap: eventTap, enable: true)
             self.isForwardingShortcut = false
-            AppLog.automation.debug("Re-enabled event tap after forwarding shortcut")
+            self.eventTapHealthPolicy.reset()
+            AppLog.automation.debug("Finished forwarding synthetic shortcut")
         }
         resumeEventTapWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + resumeDelay, execute: workItem)
