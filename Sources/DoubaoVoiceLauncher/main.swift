@@ -11,7 +11,7 @@ private let doubaoInputSourceID = "com.bytedance.inputmethod.doubaoime.pinyin"
 private let appDisplayName = "豆包语音输入切换"
 private let appLogSubsystem = Bundle.main.bundleIdentifier ?? "com.local.doubao.voice-launcher"
 private let launcherWindowWidth: CGFloat = 440
-private let launcherWindowHeight: CGFloat = 538
+private let launcherWindowHeight: CGFloat = 493
 private let launcherContentWidth: CGFloat = 410
 private let launcherCardContentWidth: CGFloat = launcherContentWidth - 22
 private let launcherShortcutContentWidth: CGFloat = launcherContentWidth - 20
@@ -130,12 +130,10 @@ private let processPathBufferSize = 4_096
 
 private enum ShortcutRole {
     case hold
-    case doubleTap
     case singleTap
 }
 
 private enum VoiceSessionKind {
-    case doubleTap
     case singleTap
 }
 
@@ -159,10 +157,6 @@ private enum ShortcutDefaults {
     private static let holdKeyCodesKey = "holdShortcutKeyCodes"
     private static let holdFlagsKey = "holdShortcutFlags"
     private static let holdDisplayKey = "holdShortcutDisplay"
-    private static let doubleKeyCodeKey = "doubleTapShortcutKeyCode"
-    private static let doubleKeyCodesKey = "doubleTapShortcutKeyCodes"
-    private static let doubleFlagsKey = "doubleTapShortcutFlags"
-    private static let doubleDisplayKey = "doubleTapShortcutDisplay"
     private static let singleTapKeyCodeKey = "singleTapShortcutKeyCode"
     private static let singleTapKeyCodesKey = "singleTapShortcutKeyCodes"
     private static let singleTapFlagsKey = "singleTapShortcutFlags"
@@ -172,20 +166,12 @@ private enum ShortcutDefaults {
         load(keyCodeKey: holdKeyCodeKey, keyCodesKey: holdKeyCodesKey, flagsKey: holdFlagsKey, displayKey: holdDisplayKey)
     }
 
-    static func loadDoubleTapShortcut() -> Shortcut? {
-        load(keyCodeKey: doubleKeyCodeKey, keyCodesKey: doubleKeyCodesKey, flagsKey: doubleFlagsKey, displayKey: doubleDisplayKey)
-    }
-
     static func loadSingleTapShortcut() -> Shortcut? {
         load(keyCodeKey: singleTapKeyCodeKey, keyCodesKey: singleTapKeyCodesKey, flagsKey: singleTapFlagsKey, displayKey: singleTapDisplayKey)
     }
 
     static func saveHoldShortcut(_ shortcut: Shortcut?) {
         save(shortcut, keyCodeKey: holdKeyCodeKey, keyCodesKey: holdKeyCodesKey, flagsKey: holdFlagsKey, displayKey: holdDisplayKey)
-    }
-
-    static func saveDoubleTapShortcut(_ shortcut: Shortcut?) {
-        save(shortcut, keyCodeKey: doubleKeyCodeKey, keyCodesKey: doubleKeyCodesKey, flagsKey: doubleFlagsKey, displayKey: doubleDisplayKey)
     }
 
     static func saveSingleTapShortcut(_ shortcut: Shortcut?) {
@@ -232,11 +218,9 @@ private enum TimingDefaults {
     static let maximumMilliseconds = 10_000
     static let defaultForwardDelayMilliseconds = 100
     static let defaultLongPressMilliseconds = 100
-    static let defaultDoubleTapMilliseconds = 450
 
     private static let forwardDelayKey = "forwardDelayMilliseconds"
     private static let longPressDurationKey = "longPressDurationMilliseconds"
-    private static let doubleTapIntervalKey = "doubleTapIntervalMilliseconds"
 
     static func loadForwardDelayMilliseconds() -> Int {
         loadMilliseconds(key: forwardDelayKey, defaultValue: defaultForwardDelayMilliseconds)
@@ -246,20 +230,12 @@ private enum TimingDefaults {
         loadMilliseconds(key: longPressDurationKey, defaultValue: defaultLongPressMilliseconds)
     }
 
-    static func loadDoubleTapMilliseconds() -> Int {
-        loadMilliseconds(key: doubleTapIntervalKey, defaultValue: defaultDoubleTapMilliseconds)
-    }
-
     static func saveForwardDelayMilliseconds(_ milliseconds: Int) {
         saveMilliseconds(milliseconds, key: forwardDelayKey)
     }
 
     static func saveLongPressMilliseconds(_ milliseconds: Int) {
         saveMilliseconds(milliseconds, key: longPressDurationKey)
-    }
-
-    static func saveDoubleTapMilliseconds(_ milliseconds: Int) {
-        saveMilliseconds(milliseconds, key: doubleTapIntervalKey)
     }
 
     static func timeInterval(milliseconds: Int) -> TimeInterval {
@@ -789,11 +765,9 @@ private struct EventTapHealthSnapshot: Equatable {
 private final class RightControlAutomation {
     private let inputSourceService: InputSourceService
     private var holdShortcut = ShortcutDefaults.loadHoldShortcut()
-    private var doubleTapShortcut = ShortcutDefaults.loadDoubleTapShortcut()
     private var singleTapShortcut = ShortcutDefaults.loadSingleTapShortcut()
     private var forwardDelayMilliseconds = TimingDefaults.loadForwardDelayMilliseconds()
     private var longPressMilliseconds = TimingDefaults.loadLongPressMilliseconds()
-    private var doubleTapMilliseconds = TimingDefaults.loadDoubleTapMilliseconds()
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var eventTapRunLoop: CFRunLoop?
@@ -807,7 +781,6 @@ private final class RightControlAutomation {
     private var lastEventTapHealthSnapshot: EventTapHealthSnapshot?
     private var isTriggerDown = false
     private var triggerDownAt: TimeInterval = 0
-    private var lastShortTapUpAt: TimeInterval = 0
     private var sessionActive = false
     private var sessionKind: VoiceSessionKind?
     private var longPressWorkItem: DispatchWorkItem?
@@ -824,7 +797,6 @@ private final class RightControlAutomation {
     private var sessionShortcut: Shortcut?
     private var activeModifierKeyCodes = Set<CGKeyCode>()
     private var activeSupportsLongPress = false
-    private var activeSupportsDoubleTap = false
     private var activeSupportsSingleTap = false
 
     var onStatus: ((String) -> Void)?
@@ -839,10 +811,6 @@ private final class RightControlAutomation {
 
     private var longPressDuration: TimeInterval {
         TimingDefaults.timeInterval(milliseconds: longPressMilliseconds)
-    }
-
-    private var doubleTapInterval: TimeInterval {
-        TimingDefaults.timeInterval(milliseconds: doubleTapMilliseconds)
     }
 
     private func logDescription(for shortcut: Shortcut?) -> String {
@@ -871,28 +839,24 @@ private final class RightControlAutomation {
         }
 
         startEventTapHealthChecks()
-        AppLog.automation.info("Keyboard automation started with hold \(self.logDescription(for: self.holdShortcut), privacy: .public), doubleTap \(self.logDescription(for: self.doubleTapShortcut), privacy: .public), singleTap \(self.logDescription(for: self.singleTapShortcut), privacy: .public)")
-        FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard automation started with hold \(logDescription(for: holdShortcut)), doubleTap \(logDescription(for: doubleTapShortcut)), singleTap \(logDescription(for: singleTapShortcut))")
+        AppLog.automation.info("Keyboard automation started with hold \(self.logDescription(for: self.holdShortcut), privacy: .public), singleTap \(self.logDescription(for: self.singleTapShortcut), privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Keyboard automation started with hold \(logDescription(for: holdShortcut)), singleTap \(logDescription(for: singleTapShortcut))")
         onStatus?("后台监听已开启：已选择的快捷键会自动切到豆包，结束后恢复原输入法。")
         return true
     }
 
     func updateConfiguration(
         hold: Shortcut?,
-        doubleTap: Shortcut?,
         singleTap: Shortcut?,
         forwardDelayMilliseconds: Int,
-        longPressMilliseconds: Int,
-        doubleTapMilliseconds: Int
+        longPressMilliseconds: Int
     ) {
         holdShortcut = hold
-        doubleTapShortcut = doubleTap
         singleTapShortcut = singleTap
         self.forwardDelayMilliseconds = TimingDefaults.clampedMilliseconds(forwardDelayMilliseconds)
         self.longPressMilliseconds = TimingDefaults.clampedMilliseconds(longPressMilliseconds)
-        self.doubleTapMilliseconds = TimingDefaults.clampedMilliseconds(doubleTapMilliseconds)
-        AppLog.automation.info("Updated automation configuration: hold \(self.logDescription(for: hold), privacy: .public), doubleTap \(self.logDescription(for: doubleTap), privacy: .public), singleTap \(self.logDescription(for: singleTap), privacy: .public), forwardDelay=\(self.forwardDelayMilliseconds, privacy: .public)ms, longPress=\(self.longPressMilliseconds, privacy: .public)ms, doubleTap=\(self.doubleTapMilliseconds, privacy: .public)ms")
-        FileDebugLog.record(level: "INFO", category: "Automation", message: "Updated automation configuration: hold \(logDescription(for: hold)), doubleTap \(logDescription(for: doubleTap)), singleTap \(logDescription(for: singleTap)), forwardDelay=\(self.forwardDelayMilliseconds)ms, longPress=\(self.longPressMilliseconds)ms, doubleTap=\(self.doubleTapMilliseconds)ms")
+        AppLog.automation.info("Updated automation configuration: hold \(self.logDescription(for: hold), privacy: .public), singleTap \(self.logDescription(for: singleTap), privacy: .public), forwardDelay=\(self.forwardDelayMilliseconds, privacy: .public)ms, longPress=\(self.longPressMilliseconds, privacy: .public)ms")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Updated automation configuration: hold \(logDescription(for: hold)), singleTap \(logDescription(for: singleTap)), forwardDelay=\(self.forwardDelayMilliseconds)ms, longPress=\(self.longPressMilliseconds)ms")
     }
 
     func stop() {
@@ -1229,9 +1193,6 @@ private final class RightControlAutomation {
         if holdShortcut?.keyCodes.contains(keyCode) == true {
             roles.append("hold")
         }
-        if doubleTapShortcut?.keyCodes.contains(keyCode) == true {
-            roles.append("doubleTap")
-        }
         if singleTapShortcut?.keyCodes.contains(keyCode) == true {
             roles.append("singleTap")
         }
@@ -1366,16 +1327,8 @@ private final class RightControlAutomation {
         )
 
         let holdKeyCodes = holdShortcut.map { Set($0.keyCodes) }
-        let doubleTapKeyCodes = doubleTapShortcut.map { Set($0.keyCodes) }
         let singleTapKeyCodes = singleTapShortcut.map { Set($0.keyCodes) }
         let supportsLongPress = holdKeyCodes.map {
-            ShortcutMatchState.isPressed(
-                changedKeyCode: keyCode,
-                activeModifierKeyCodes: activeModifierKeyCodes,
-                shortcutKeyCodes: $0
-            )
-        } ?? false
-        let supportsDoubleTap = doubleTapKeyCodes.map {
             ShortcutMatchState.isPressed(
                 changedKeyCode: keyCode,
                 activeModifierKeyCodes: activeModifierKeyCodes,
@@ -1389,12 +1342,11 @@ private final class RightControlAutomation {
                 shortcutKeyCodes: $0
             )
         } ?? false
-        let shortcut = supportsSingleTap ? singleTapShortcut : (supportsDoubleTap ? doubleTapShortcut : holdShortcut)
-        if let shortcut, (supportsLongPress || supportsDoubleTap || supportsSingleTap) && !isTriggerDown {
+        let shortcut = supportsSingleTap ? singleTapShortcut : holdShortcut
+        if let shortcut, (supportsLongPress || supportsSingleTap) && !isTriggerDown {
             handleTriggerDown(
                 shortcut: shortcut,
                 supportsLongPress: supportsLongPress,
-                supportsDoubleTap: supportsDoubleTap,
                 supportsSingleTap: supportsSingleTap
             )
             return
@@ -1412,24 +1364,12 @@ private final class RightControlAutomation {
     }
 
     private func handleKeyDown() {
-        guard sessionActive, sessionKind == .doubleTap else {
-            return
-        }
-        guard sessionStopWorkItem == nil else {
-            return
-        }
-
-        AppLog.automation.info("Detected regular key down while no-hold session is active; scheduling restore")
-        FileDebugLog.record(level: "INFO", category: "Automation", message: "Detected regular key down while no-hold session is active; scheduling restore")
-        if let shortcut = sessionShortcut {
-            scheduleNoHoldStop(shortcut: shortcut, delay: 0.25, message: "检测到按键结束语音输入，已恢复原输入法。")
-        }
     }
 
     private func handleKeyUp() {
     }
 
-    private func handleTriggerDown(shortcut: Shortcut, supportsLongPress: Bool, supportsDoubleTap: Bool, supportsSingleTap: Bool) {
+    private func handleTriggerDown(shortcut: Shortcut, supportsLongPress: Bool, supportsSingleTap: Bool) {
         if isShortcutTransitionBlocked {
             let reason = shortcutTransitionBlockReason
             AppLog.automation.info("Shortcut trigger down ignored because \(reason, privacy: .public)")
@@ -1442,12 +1382,11 @@ private final class RightControlAutomation {
         didTriggerLongPress = false
         activeShortcut = shortcut
         activeSupportsLongPress = supportsLongPress
-        activeSupportsDoubleTap = supportsDoubleTap
         activeSupportsSingleTap = supportsSingleTap
         triggerDownAt = ProcessInfo.processInfo.systemUptime
         let pressStartedAt = triggerDownAt
-        AppLog.automation.info("Shortcut trigger down: \(shortcut.logDescription, privacy: .public), longPress=\(supportsLongPress, privacy: .public), doubleTap=\(supportsDoubleTap, privacy: .public), singleTap=\(supportsSingleTap, privacy: .public)")
-        FileDebugLog.record(level: "INFO", category: "Automation", message: "Shortcut trigger down: \(shortcut.logDescription), longPress=\(supportsLongPress), doubleTap=\(supportsDoubleTap), singleTap=\(supportsSingleTap)")
+        AppLog.automation.info("Shortcut trigger down: \(shortcut.logDescription, privacy: .public), longPress=\(supportsLongPress, privacy: .public), singleTap=\(supportsSingleTap, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "Automation", message: "Shortcut trigger down: \(shortcut.logDescription), longPress=\(supportsLongPress), singleTap=\(supportsSingleTap)")
 
         if sessionActive {
             AppLog.automation.info("Shortcut pressed while no-hold session is active")
@@ -1493,7 +1432,6 @@ private final class RightControlAutomation {
     }
 
     private func handleTriggerUp() {
-        let now = ProcessInfo.processInfo.systemUptime
         isTriggerDown = false
         longPressWorkItem?.cancel()
         longPressWorkItem = nil
@@ -1501,7 +1439,6 @@ private final class RightControlAutomation {
             resetActiveTrigger()
             return
         }
-        let supportsDoubleTap = activeSupportsDoubleTap
         let supportsSingleTap = activeSupportsSingleTap
         AppLog.automation.info("Shortcut trigger up: \(shortcut.logDescription, privacy: .public), didLongPress=\(self.didTriggerLongPress, privacy: .public), sessionActive=\(self.sessionActive, privacy: .public)")
         FileDebugLog.record(level: "INFO", category: "Automation", message: "Shortcut trigger up: \(shortcut.logDescription), didLongPress=\(didTriggerLongPress), sessionActive=\(sessionActive)")
@@ -1535,7 +1472,6 @@ private final class RightControlAutomation {
                 return
             }
             scheduleNoHoldStop(shortcut: sessionShortcut ?? shortcut, delay: 0.08, message: "检测到快捷键单击结束语音输入，已恢复原输入法。")
-            lastShortTapUpAt = 0
             return
         }
 
@@ -1547,31 +1483,8 @@ private final class RightControlAutomation {
                 return
             }
             prepareNoHoldActivation(shortcut: shortcut, kind: .singleTap)
-            lastShortTapUpAt = 0
             return
         }
-
-        guard supportsDoubleTap else {
-            AppLog.automation.debug("Trigger up ignored because active shortcut does not support double-tap flow")
-            return
-        }
-
-        if now - lastShortTapUpAt <= doubleTapInterval {
-            guard inputSourceService.beginDoubaoSession() else {
-                AppLog.automation.error("Double-tap flow failed to switch to Doubao input source")
-                FileDebugLog.record(level: "ERROR", category: "Automation", message: "Double-tap flow failed to switch to Doubao input source")
-                onStatus?("切换到豆包输入法失败。")
-                return
-            }
-            prepareNoHoldActivation(shortcut: shortcut, kind: .doubleTap)
-            lastShortTapUpAt = 0
-            return
-        }
-
-        lastShortTapUpAt = now
-        AppLog.automation.info("First double-tap candidate recorded")
-        FileDebugLog.record(level: "INFO", category: "Automation", message: "First double-tap candidate recorded")
-        onStatus?("检测到一次双击模式快捷键，等待第二次按下。")
     }
 
     private func prepareNoHoldActivation(shortcut: Shortcut, kind: VoiceSessionKind) {
@@ -1706,12 +1619,7 @@ private final class RightControlAutomation {
         sessionShortcut = pending.shortcut
         AppLog.automation.info("No-hold activation confirmed after \(elapsed, privacy: .public) seconds, attempt \(pending.attempt, privacy: .public), probe \(probeNumber, privacy: .public)/\(probeCount, privacy: .public)")
         FileDebugLog.record(level: "INFO", category: "Automation", message: "No-hold activation confirmed after \(elapsed) seconds, attempt \(pending.attempt), probe \(probeNumber)/\(probeCount)")
-        switch pending.kind {
-        case .singleTap:
-            onStatus?("检测到单击模式快捷键，已确认豆包语音输入启动。")
-        case .doubleTap:
-            onStatus?("检测到双击模式快捷键，已确认豆包语音输入启动。")
-        }
+        onStatus?("检测到单击模式快捷键，已确认豆包语音输入启动。")
     }
 
     private func handleVoiceActivationProbeMiss(
@@ -1805,7 +1713,6 @@ private final class RightControlAutomation {
         didTriggerLongPress = false
         longPressWorkItem?.cancel()
         longPressWorkItem = nil
-        lastShortTapUpAt = 0
         resetActiveTrigger()
         if pending.shortcutIsDown {
             forwardShortcutEvent {
@@ -1912,7 +1819,6 @@ private final class RightControlAutomation {
     private func resetActiveTrigger() {
         activeShortcut = nil
         activeSupportsLongPress = false
-        activeSupportsDoubleTap = false
         activeSupportsSingleTap = false
         triggerDownAt = 0
     }
@@ -1976,7 +1882,6 @@ private final class EditingDismissView: NSView {
 private enum SettingsIconKind {
     case forwardDelay
     case singleTap
-    case doubleTap
     case longPress
 
     var assetName: String {
@@ -1985,8 +1890,6 @@ private enum SettingsIconKind {
             return "icon-forward-delay"
         case .singleTap:
             return "icon-single-tap"
-        case .doubleTap:
-            return "icon-double-tap"
         case .longPress:
             return "icon-long-press"
         }
@@ -2167,17 +2070,14 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     private enum TimingControlTag {
         static let forwardDelay = 1
         static let longPress = 2
-        static let doubleTap = 3
     }
 
     private let inputSourceService = InputSourceService()
     private lazy var automation = RightControlAutomation(inputSourceService: inputSourceService)
     private var holdShortcut = ShortcutDefaults.loadHoldShortcut()
-    private var doubleTapShortcut = ShortcutDefaults.loadDoubleTapShortcut()
     private var singleTapShortcut = ShortcutDefaults.loadSingleTapShortcut()
     private var forwardDelayMilliseconds = TimingDefaults.loadForwardDelayMilliseconds()
     private var longPressMilliseconds = TimingDefaults.loadLongPressMilliseconds()
-    private var doubleTapMilliseconds = TimingDefaults.loadDoubleTapMilliseconds()
     private var statusMessage: String?
     private var shortcutPickerPopover: NSPopover?
     private var dismissEditingMonitor: Any?
@@ -2189,14 +2089,11 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     private let doubaoStatusValueLabel = NSTextField(labelWithString: "")
     private let currentInputValueLabel = NSTextField(labelWithString: "")
     private let holdShortcutButton = ShortcutSelectButton(title: "")
-    private let doubleTapShortcutButton = ShortcutSelectButton(title: "")
     private let singleTapShortcutButton = ShortcutSelectButton(title: "")
     private let forwardDelayTextField = NSTextField(string: "")
     private let forwardDelayStepper = NSStepper()
     private let longPressTextField = NSTextField(string: "")
     private let longPressStepper = NSStepper()
-    private let doubleTapTextField = NSTextField(string: "")
-    private let doubleTapStepper = NSStepper()
     private let monitorToggleButton = PrimaryActionButton(title: "开始监听")
     private let monitorStatusDotView = EditingDismissView()
 
@@ -2252,9 +2149,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         holdShortcutButton.target = self
         holdShortcutButton.action = #selector(showHoldShortcutPicker(_:))
 
-        doubleTapShortcutButton.target = self
-        doubleTapShortcutButton.action = #selector(showDoubleTapShortcutPicker(_:))
-
         singleTapShortcutButton.target = self
         singleTapShortcutButton.action = #selector(showSingleTapShortcutPicker(_:))
         updateShortcutButtons()
@@ -2275,7 +2169,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
 
         [openSettingsButton, accessibilityButton].forEach(configureSecondaryButton)
         configureShortcutButton(holdShortcutButton)
-        configureShortcutButton(doubleTapShortcutButton)
         configureShortcutButton(singleTapShortcutButton)
 
         let statusContent = makeStatusContent()
@@ -2302,16 +2195,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
             ),
             makeHorizontalDivider(),
             makeShortcutRow(
-                iconKind: .doubleTap,
-                title: "双击模式",
-                prefix: "双击",
-                button: doubleTapShortcutButton,
-                suffix: "开始，再按结束，双击间隔",
-                timingView: makeTimingControl(title: "双击最短间隔", textField: doubleTapTextField, stepper: doubleTapStepper),
-                timingWidth: 78
-            ),
-            makeHorizontalDivider(),
-            makeShortcutRow(
                 iconKind: .longPress,
                 title: "长按模式",
                 prefix: "长按",
@@ -2325,7 +2208,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         shortcutContent.spacing = 4
         shortcutContent.alignment = .leading
         let shortcutCard = makeRoundedContainer(content: shortcutContent, horizontalPadding: 10, verticalPadding: 5)
-        shortcutCard.heightAnchor.constraint(equalToConstant: 133).isActive = true
+        shortcutCard.heightAnchor.constraint(equalToConstant: 88).isActive = true
 
         let secondaryButtonRow = makeBottomActionBar(buttons: [openSettingsButton, accessibilityButton])
 
@@ -2796,12 +2679,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
             tag: TimingControlTag.longPress,
             value: longPressMilliseconds
         )
-        configureTimingPair(
-            textField: doubleTapTextField,
-            stepper: doubleTapStepper,
-            tag: TimingControlTag.doubleTap,
-            value: doubleTapMilliseconds
-        )
     }
 
     private func installDismissEditingMonitor() {
@@ -2824,7 +2701,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     }
 
     private func isTimingTextField(_ view: NSView) -> Bool {
-        let timingTextFields = [forwardDelayTextField, longPressTextField, doubleTapTextField]
+        let timingTextFields = [forwardDelayTextField, longPressTextField]
         return timingTextFields.contains { textField in
             view === textField || view.isDescendant(of: textField)
         }
@@ -2908,12 +2785,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
             longPressTextField.integerValue = value
             longPressStepper.integerValue = value
             refreshStatus("已更新长按触发时长：\(value) ms。")
-        case TimingControlTag.doubleTap:
-            doubleTapMilliseconds = value
-            TimingDefaults.saveDoubleTapMilliseconds(value)
-            doubleTapTextField.integerValue = value
-            doubleTapStepper.integerValue = value
-            refreshStatus("已更新双击最短间隔：\(value) ms。")
         default:
             return
         }
@@ -2923,11 +2794,9 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     private func syncAutomationConfiguration() {
         automation.updateConfiguration(
             hold: holdShortcut,
-            doubleTap: doubleTapShortcut,
             singleTap: singleTapShortcut,
             forwardDelayMilliseconds: forwardDelayMilliseconds,
-            longPressMilliseconds: longPressMilliseconds,
-            doubleTapMilliseconds: doubleTapMilliseconds
+            longPressMilliseconds: longPressMilliseconds
         )
     }
 
@@ -2971,7 +2840,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
 
     private func updateShortcutButtons() {
         holdShortcutButton.title = holdShortcut?.display ?? "快捷键"
-        doubleTapShortcutButton.title = doubleTapShortcut?.display ?? "快捷键"
         singleTapShortcutButton.title = singleTapShortcut?.display ?? "快捷键"
     }
 
@@ -3004,10 +2872,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         showShortcutPicker(role: .hold, sourceButton: sender)
     }
 
-    @objc private func showDoubleTapShortcutPicker(_ sender: NSButton) {
-        showShortcutPicker(role: .doubleTap, sourceButton: sender)
-    }
-
     @objc private func showSingleTapShortcutPicker(_ sender: NSButton) {
         showShortcutPicker(role: .singleTap, sourceButton: sender)
     }
@@ -3020,9 +2884,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         case .hold:
             currentShortcut = holdShortcut
             title = "选择长按模式快捷键"
-        case .doubleTap:
-            currentShortcut = doubleTapShortcut
-            title = "选择双击模式快捷键"
         case .singleTap:
             currentShortcut = singleTapShortcut
             title = "选择单击模式快捷键"
@@ -3046,12 +2907,6 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
                 AppLog.ui.info("Applied hold shortcut \(shortcutLog, privacy: .public)")
                 FileDebugLog.record(level: "INFO", category: "UI", message: "Applied hold shortcut \(shortcutLog)")
                 self.refreshStatus("已设置长按模式快捷键：\(shortcutDisplay)。")
-            case .doubleTap:
-                self.doubleTapShortcut = shortcut
-                ShortcutDefaults.saveDoubleTapShortcut(shortcut)
-                AppLog.ui.info("Applied double-tap shortcut \(shortcutLog, privacy: .public)")
-                FileDebugLog.record(level: "INFO", category: "UI", message: "Applied double-tap shortcut \(shortcutLog)")
-                self.refreshStatus("已设置双击模式快捷键：\(shortcutDisplay)。")
             case .singleTap:
                 self.singleTapShortcut = shortcut
                 ShortcutDefaults.saveSingleTapShortcut(shortcut)
@@ -3468,9 +3323,6 @@ private final class SettingsRowIconView: NSView {
             drawHourglass(in: rect)
         case .singleTap:
             drawCursor(in: rect, offset: .zero, alpha: 1.0)
-        case .doubleTap:
-            drawCursor(in: rect, offset: NSPoint(x: -2.1, y: 2.0), alpha: 0.58)
-            drawCursor(in: rect, offset: NSPoint(x: 1.0, y: -0.9), alpha: 1.0)
         case .longPress:
             drawFinger(in: rect)
         }
@@ -3482,8 +3334,6 @@ private final class SettingsRowIconView: NSView {
             return NSGradient(starting: NSColor(calibratedRed: 1.0, green: 0.70, blue: 0.25, alpha: 1), ending: NSColor(calibratedRed: 1.0, green: 0.54, blue: 0.0, alpha: 1))!
         case .singleTap:
             return NSGradient(starting: NSColor(calibratedRed: 0.34, green: 0.85, blue: 0.47, alpha: 1), ending: NSColor(calibratedRed: 0.07, green: 0.63, blue: 0.31, alpha: 1))!
-        case .doubleTap:
-            return NSGradient(starting: NSColor(calibratedRed: 0.27, green: 0.66, blue: 1.0, alpha: 1), ending: NSColor(calibratedRed: 0.0, green: 0.40, blue: 0.84, alpha: 1))!
         case .longPress:
             return NSGradient(starting: NSColor(calibratedRed: 0.78, green: 0.49, blue: 1.0, alpha: 1), ending: NSColor(calibratedRed: 0.49, green: 0.24, blue: 0.80, alpha: 1))!
         }
