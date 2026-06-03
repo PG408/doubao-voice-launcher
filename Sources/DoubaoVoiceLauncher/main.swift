@@ -2083,6 +2083,8 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
     private var dismissEditingMonitor: Any?
     private var isMonitoring = false
 
+    var monitoringStateDidChange: ((Bool) -> Void)?
+
     private let messageLabel = NSTextField(labelWithString: "")
     private let monitorStatusValueLabel = NSTextField(labelWithString: "")
     private let monitorStatusIconView = StatusIconView(kind: .wave)
@@ -2117,6 +2119,7 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         let started = automation.start()
         isMonitoring = started
         updateMonitorToggleButton()
+        monitoringStateDidChange?(isMonitoring)
         AppLog.ui.info("Initial automation start result: \(started, privacy: .public)")
         FileDebugLog.record(level: "INFO", category: "UI", message: "Initial automation start result: \(started)")
         if started {
@@ -2849,23 +2852,37 @@ private final class LauncherViewController: NSViewController, NSTextFieldDelegat
         monitorToggleButton.symbolName = isMonitoring ? "pause.circle.fill" : "play.circle.fill"
     }
 
+    func statusItemToggleTitle() -> String {
+        isMonitoring ? "暂停监听" : "继续监听"
+    }
+
+    func toggleMonitoringFromStatusItem() {
+        performMonitoringToggle(source: "status item")
+    }
+
     @objc private func toggleMonitoring() {
+        performMonitoringToggle(source: "launcher UI")
+    }
+
+    private func performMonitoringToggle(source: String) {
         if isMonitoring {
-            AppLog.ui.info("User paused keyboard automation from launcher UI")
-            FileDebugLog.record(level: "INFO", category: "UI", message: "User paused keyboard automation from launcher UI")
+            AppLog.ui.info("User paused keyboard automation from \(source, privacy: .public)")
+            FileDebugLog.record(level: "INFO", category: "UI", message: "User paused keyboard automation from \(source)")
             automation.stop()
             isMonitoring = false
             updateMonitorToggleButton()
             refreshStatus("后台监听已暂停；快捷键暂时不会触发切换。")
+            monitoringStateDidChange?(isMonitoring)
             return
         }
 
-        AppLog.ui.info("User started keyboard automation from launcher UI")
-        FileDebugLog.record(level: "INFO", category: "UI", message: "User started keyboard automation from launcher UI")
+        AppLog.ui.info("User started keyboard automation from \(source, privacy: .public)")
+        FileDebugLog.record(level: "INFO", category: "UI", message: "User started keyboard automation from \(source)")
         let started = automation.start()
         isMonitoring = started
         updateMonitorToggleButton()
         refreshStatus(started ? "后台监听已开启。" : "后台监听启动失败，请检查权限。")
+        monitoringStateDidChange?(isMonitoring)
     }
 
     @objc private func showHoldShortcutPicker(_ sender: NSButton) {
@@ -3532,6 +3549,8 @@ private extension NSRect {
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var launcherViewController: LauncherViewController?
+    private var statusItem: NSStatusItem?
+    private var monitoringMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLog.app.info("Application did finish launching")
@@ -3539,6 +3558,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         installMainMenu()
         let controller = LauncherViewController()
+        controller.monitoringStateDidChange = { [weak self] _ in
+            self?.updateStatusItemMenu()
+        }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: launcherWindowWidth, height: launcherWindowHeight),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -3561,6 +3583,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         self.launcherViewController = controller
         self.window = window
+        installStatusItem()
         AppLog.app.info("Main window is visible")
         FileDebugLog.record(level: "INFO", category: "App", message: "Main window is visible")
     }
@@ -3606,6 +3629,111 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
+    }
+
+    private func installStatusItem() {
+        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        self.statusItem = statusItem
+
+        if let button = statusItem.button {
+            button.image = makeStatusItemImage()
+            button.imagePosition = .imageOnly
+            button.toolTip = appDisplayName
+        }
+
+        let menu = NSMenu(title: appDisplayName)
+        let showSettingsItem = NSMenuItem(
+            title: "显示设置窗口",
+            action: #selector(showSettingsWindowFromStatusItem(_:)),
+            keyEquivalent: ""
+        )
+        showSettingsItem.target = self
+        showSettingsItem.image = nil
+        menu.addItem(showSettingsItem)
+
+        let monitoringItem = NSMenuItem(
+            title: launcherViewController?.statusItemToggleTitle() ?? "暂停监听",
+            action: #selector(toggleMonitoringFromStatusItem(_:)),
+            keyEquivalent: ""
+        )
+        monitoringItem.target = self
+        menu.addItem(monitoringItem)
+
+        let quitItem = NSMenuItem(
+            title: "退出",
+            action: #selector(quitFromStatusItem(_:)),
+            keyEquivalent: ""
+        )
+        quitItem.target = self
+        quitItem.image = nil
+        menu.addItem(quitItem)
+
+        monitoringMenuItem = monitoringItem
+        statusItem.menu = menu
+        updateStatusItemMenu()
+    }
+
+    private func makeStatusItemImage() -> NSImage {
+        let iconSize = NSStatusBar.system.thickness
+        let image = NSImage(size: NSSize(width: iconSize, height: iconSize), flipped: false) { rect in
+            let unit = rect.width / 22
+            NSColor.black.setStroke()
+            NSColor.black.setFill()
+            let strokeWidth: CGFloat = 1.35 * unit
+
+            let frameRect = NSRect(
+                x: 2.5 * unit,
+                y: 3.4 * unit,
+                width: 17.0 * unit,
+                height: 15.2 * unit
+            )
+            let framePath = NSBezierPath(
+                roundedRect: frameRect,
+                xRadius: 3.1 * unit,
+                yRadius: 3.1 * unit
+            )
+            framePath.lineWidth = strokeWidth
+            framePath.stroke()
+
+            let voiceprintBarHeights: [CGFloat] = [6.6, 10.7, 8.2, 5.7].map { $0 * unit }
+            let barWidth: CGFloat = 1.6 * unit
+            let barGap: CGFloat = 1.75 * unit
+            let totalBarWidth = CGFloat(voiceprintBarHeights.count) * barWidth
+                + CGFloat(voiceprintBarHeights.count - 1) * barGap
+            var barX = frameRect.midX - totalBarWidth / 2
+            let barCenterY = frameRect.midY + 0.1 * unit
+
+            for height in voiceprintBarHeights {
+                let barRect = NSRect(
+                    x: barX,
+                    y: barCenterY - height / 2,
+                    width: barWidth,
+                    height: height
+                )
+                NSBezierPath(roundedRect: barRect, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+                barX += barWidth + barGap
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    private func updateStatusItemMenu() {
+        monitoringMenuItem?.title = launcherViewController?.statusItemToggleTitle() ?? "暂停监听"
+    }
+
+    @objc private func toggleMonitoringFromStatusItem(_ sender: Any?) {
+        launcherViewController?.toggleMonitoringFromStatusItem()
+        updateStatusItemMenu()
+    }
+
+    @objc private func showSettingsWindowFromStatusItem(_ sender: Any?) {
+        showMainWindow(reason: "status item")
+    }
+
+    @objc private func quitFromStatusItem(_ sender: Any?) {
+        NSApp.terminate(sender)
     }
 
     @objc private func showSettingsWindow(_ sender: Any?) {
