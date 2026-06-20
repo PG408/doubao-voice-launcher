@@ -56,6 +56,6 @@ struct VoiceLauncherGlyph: View {
       }
     }
     .frame(width: size, height: size)
-    .accessibilityLabel("豆包语音启动器")
+    .accessibilityLabel("豆包语音切换器")
   }
 }

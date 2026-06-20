@@ -9,14 +9,14 @@ struct SettingsView: View {
   @AppStorage("launchAtLogin") private var launchAtLogin = false
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 18) {
+    VStack(alignment: .leading, spacing: 16) {
       commandHeader
       readinessSummary
       settingsSurface
       logFooter
     }
-    .padding(22)
-    .frame(width: 540)
+    .padding(20)
+    .frame(width: 440)
     .onChange(of: doubaoShortcutKeys) {
       model.updateGlobalShortcutRegistration()
     }
@@ -34,11 +34,11 @@ struct SettingsView: View {
 
   private var commandHeader: some View {
     HStack(alignment: .center, spacing: 14) {
-      VoiceLauncherGlyph(size: 46, color: .secondary)
+      VoiceLauncherGlyph(size: 46, color: model.status.tint)
 
       VStack(alignment: .leading, spacing: 6) {
         HStack(spacing: 8) {
-          Text("豆包语音启动器")
+          Text("豆包语音切换器")
             .font(.title2.weight(.semibold))
 
           StatusChip(status: model.status)
@@ -73,7 +73,7 @@ struct SettingsView: View {
       Text("状态")
         .font(.headline)
 
-      HStack(spacing: 10) {
+      HStack(spacing: 8) {
         ForEach(model.prerequisites) { item in
           ReadinessCard(item: item)
         }
@@ -146,7 +146,7 @@ struct SettingsView: View {
         Button("清空") { model.clearLogs() }
       }
     }
-    .padding(14)
+    .padding(13)
     .background(.quaternary.opacity(0.32), in: RoundedRectangle(cornerRadius: 8))
   }
 
@@ -186,23 +186,29 @@ private struct DoubaoShortcutPickerView: View {
       isShowingPanel.toggle()
     }
     .popover(isPresented: $isShowingPanel, arrowEdge: .bottom) {
-      VStack(alignment: .leading, spacing: 12) {
+      VStack(alignment: .leading, spacing: 10) {
         Text("豆包快捷键")
           .font(.headline)
 
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 86), spacing: 8)], alignment: .leading, spacing: 8) {
-          ForEach(DoubaoShortcutKey.allCases, id: \.self) { key in
-            Toggle(key.displayText, isOn: binding(for: key))
-              .toggleStyle(.button)
-          }
+        VStack(alignment: .leading, spacing: 6) {
+          shortcutRow(left: .leftControl, right: .rightControl)
+          shortcutRow(left: .leftOption, right: .rightOption)
+          shortcutRow(left: .leftCommand, right: .rightCommand)
+          ShortcutKeyButton(key: .function, isOn: binding(for: .function))
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
 
-        Text("仅支持左右 Command、左右 Option、左右 Control 和 Fn。")
-          .font(.caption)
-          .foregroundStyle(.secondary)
       }
-      .padding(14)
-      .frame(width: 330)
+      .padding(.horizontal, 14)
+      .padding(.vertical, 12)
+      .frame(width: 144, alignment: .leading)
+    }
+  }
+
+  private func shortcutRow(left: DoubaoShortcutKey, right: DoubaoShortcutKey) -> some View {
+    HStack(spacing: 6) {
+      ShortcutKeyButton(key: left, isOn: binding(for: left))
+      ShortcutKeyButton(key: right, isOn: binding(for: right))
     }
   }
 
@@ -221,6 +227,19 @@ private struct DoubaoShortcutPickerView: View {
         storageValue = DoubaoShortcut(keys: keys).storageValue
       }
     )
+  }
+}
+
+private struct ShortcutKeyButton: View {
+  let key: DoubaoShortcutKey
+  let isOn: Binding<Bool>
+
+  var body: some View {
+    Toggle(key.displayText, isOn: isOn)
+      .toggleStyle(.button)
+      .controlSize(.small)
+      .font(.body.weight(.medium))
+      .frame(width: 52, height: 28)
   }
 }
 
@@ -263,8 +282,8 @@ private struct ReadinessCard: View {
 
       Spacer()
     }
-    .padding(13)
-    .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+    .padding(12)
+    .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
     .background(.quaternary.opacity(0.32), in: RoundedRectangle(cornerRadius: 8))
   }
 }
@@ -295,7 +314,7 @@ private struct ControlRow<Control: View>: View {
 
       control
     }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 12)
+    .padding(.horizontal, 13)
+    .padding(.vertical, 11)
   }
 }

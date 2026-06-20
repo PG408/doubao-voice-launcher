@@ -10,8 +10,8 @@ struct DoubaoVoiceSwitchApp: App {
     MenuBarExtra {
       MenuBarView(model: model)
     } label: {
-      Image(nsImage: VoiceLauncherGlyphImage.make(size: 22, color: model.status.nsColor))
-        .accessibilityLabel("豆包语音启动器，\(model.statusTitle)")
+      Image(nsImage: VoiceLauncherGlyphImage.make(size: 22, color: .white))
+        .accessibilityLabel("豆包语音切换器，\(model.statusTitle)")
     }
     .menuBarExtraStyle(.window)
 

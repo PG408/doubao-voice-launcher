@@ -1,5 +1,4 @@
 import DoubaoVoiceSwitchCore
-import AppKit
 import SwiftUI
 
 extension AppStatus {
@@ -24,14 +23,6 @@ extension AppStatus {
     case .running: return .green
     case .paused: return .orange
     case .preparing: return .secondary
-    }
-  }
-
-  var nsColor: NSColor {
-    switch self {
-    case .running: return .systemGreen
-    case .paused: return .systemOrange
-    case .preparing: return .secondaryLabelColor
     }
   }
 }

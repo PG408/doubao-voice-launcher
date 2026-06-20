@@ -6,24 +6,17 @@ struct MenuBarView: View {
   @ObservedObject var model: AppModel
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 9) {
+    VStack(alignment: .leading, spacing: 8) {
       HStack(alignment: .center, spacing: 10) {
         VoiceLauncherGlyph(size: 34, color: model.status.tint)
           .frame(width: 34, height: 34)
 
-        VStack(alignment: .leading, spacing: 3) {
-          HStack(spacing: 6) {
-            Text("豆包语音启动器")
-              .font(.headline)
-              .lineLimit(1)
-            StatusDot(status: model.status)
-          }
+        VStack(alignment: .leading, spacing: 5) {
+          Text("豆包语音切换器")
+            .font(.headline)
+            .lineLimit(1)
 
-          Text(menuSubtitle)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(2)
-            .fixedSize(horizontal: false, vertical: true)
+          StatusDot(status: model.status)
         }
       }
 
@@ -74,20 +67,9 @@ struct MenuBarView: View {
       }
     }
     .padding(10)
-    .frame(width: 240, alignment: .leading)
+    .frame(width: 220, alignment: .leading)
     .fixedSize(horizontal: false, vertical: true)
     .id(menuLayoutID)
-  }
-
-  private var menuSubtitle: String {
-    switch model.status {
-    case .preparing:
-      return "仍有前置条件未完成"
-    case .paused:
-      return "已暂停响应快捷键"
-    case .running:
-      return "监听快捷键中"
-    }
   }
 
   private var missingPrerequisites: [PrerequisiteItem] {
