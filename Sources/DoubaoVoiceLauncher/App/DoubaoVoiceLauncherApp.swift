@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -6,9 +7,13 @@ struct DoubaoVoiceLauncherApp: App {
   @StateObject private var model = AppModel.shared
 
   var body: some Scene {
-    MenuBarExtra(model.statusTitle, systemImage: model.statusSystemImage) {
+    MenuBarExtra {
       MenuBarView(model: model)
+    } label: {
+      Image(nsImage: VoiceLauncherGlyphImage.make(size: 22, color: model.status.nsColor))
+        .accessibilityLabel("豆包语音启动器，\(model.statusTitle)")
     }
+    .menuBarExtraStyle(.window)
 
     Settings {
       SettingsView(model: model)

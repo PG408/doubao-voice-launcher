@@ -18,7 +18,8 @@ let package = Package(
   targets: [
     .executableTarget(
       name: "DoubaoVoiceLauncher",
-      dependencies: ["DoubaoVoiceLauncherCore"]
+      dependencies: ["DoubaoVoiceLauncherCore"],
+      resources: [.copy("Resources")]
     ),
     .target(name: "DoubaoVoiceLauncherCore"),
     .executableTarget(

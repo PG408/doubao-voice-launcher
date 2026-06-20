@@ -83,22 +83,6 @@ final class AppModel: ObservableObject {
     logger.logDirectory
   }
 
-  var diagnosticSummary: String {
-    [
-      "DoubaoVoiceLauncher Diagnostic Summary",
-      "Status: \(status.title)",
-      "Accessibility: \(accessibilityTrusted)",
-      "Doubao input source: \(doubaoInputSourceAvailable)",
-      "Shortcut: \(storedShortcut.displayText)",
-      "Long press threshold: \(handoffController.longPressThresholdMilliseconds) ms",
-      "Input source handoff active: \(isInputSourceHandoffActive)",
-      "Last message: \(lastMessage)",
-      "Last failure: \(lastFailureMessage ?? "none")",
-      "Log directory: \(logDirectory.path)",
-      "Next action: \(nextDiagnosticAction)"
-    ].joined(separator: "\n")
-  }
-
   func refreshReadiness() {
     accessibilityTrusted = probe.isAccessibilityTrusted()
     doubaoInputSourceAvailable = probe.isDoubaoInputSourceAvailable()
@@ -190,13 +174,6 @@ final class AppModel: ObservableObject {
     lastMessage = "日志已清空"
   }
 
-  func copyDiagnosticSummary() {
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(diagnosticSummary, forType: .string)
-    lastMessage = "诊断摘要已复制"
-    record(.app, "diagnostic summary copied")
-  }
-
   func setLaunchAtLogin(_ isEnabled: Bool) {
     do {
       try launchAtLoginService.setEnabled(isEnabled)
@@ -251,19 +228,6 @@ final class AppModel: ObservableObject {
       .app,
       "readiness status \(status.title), accessibility=\(accessibilityTrusted), doubaoInputSource=\(doubaoInputSourceAvailable)"
     )
-  }
-
-  private var nextDiagnosticAction: String {
-    if !accessibilityTrusted {
-      return "Manually grant Accessibility permission to DoubaoVoiceLauncher."
-    }
-    if !doubaoInputSourceAvailable {
-      return "Install and enable the Doubao input source."
-    }
-    if status == .paused {
-      return "Resume the app before testing the shortcut."
-    }
-    return "Test the configured shortcut and let Doubao handle voice input."
   }
 
   private func startReadinessPolling() {

@@ -9,16 +9,14 @@ struct SettingsView: View {
   @AppStorage("launchAtLogin") private var launchAtLogin = false
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 16) {
-      header
-      statusSection
-      shortcutSection
-      launchSection
-      diagnosticSection
-      logSection
+    VStack(alignment: .leading, spacing: 18) {
+      commandHeader
+      readinessSummary
+      settingsSurface
+      logFooter
     }
     .padding(22)
-    .frame(width: 580)
+    .frame(width: 540)
     .onChange(of: doubaoShortcutKeys) {
       model.updateGlobalShortcutRegistration()
     }
@@ -34,82 +32,76 @@ struct SettingsView: View {
     }
   }
 
-  private var header: some View {
-    HStack(spacing: 12) {
-      Image(systemName: model.statusSystemImage)
-        .font(.system(size: 24))
-        .foregroundStyle(model.status.tint)
-        .frame(width: 30)
+  private var commandHeader: some View {
+    HStack(alignment: .center, spacing: 14) {
+      VoiceLauncherGlyph(size: 46, color: .secondary)
 
-      VStack(alignment: .leading, spacing: 2) {
-        Text("豆包语音启动器")
-          .font(.title3.weight(.semibold))
-        Text(model.statusTitle)
+      VStack(alignment: .leading, spacing: 6) {
+        HStack(spacing: 8) {
+          Text("豆包语音启动器")
+            .font(.title2.weight(.semibold))
+
+          StatusChip(status: model.status)
+        }
+
+        Text(commandHeaderMessage)
           .font(.subheadline)
           .foregroundStyle(.secondary)
       }
 
       Spacer()
 
-      if model.status == .paused {
-        Button("继续") { model.resume() }
+      if needsAccessibilityAuthorization {
+        Button("授权") { model.openAccessibilitySettings() }
+          .buttonStyle(.borderedProminent)
+          .controlSize(.large)
       } else {
-        Button("暂停") { model.pause() }
+        Button(model.status == .paused ? "继续" : "暂停") {
+          if model.status == .paused {
+            model.resume()
+          } else {
+            model.pause()
+          }
+        }
+        .controlSize(.large)
       }
     }
   }
 
-  private var statusSection: some View {
-    SettingsSection(title: "状态") {
-      VStack(spacing: 10) {
+  private var readinessSummary: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("状态")
+        .font(.headline)
+
+      HStack(spacing: 10) {
         ForEach(model.prerequisites) { item in
-          HStack(spacing: 10) {
-            Image(systemName: item.isReady ? "checkmark.circle.fill" : "exclamationmark.circle")
-              .foregroundStyle(item.isReady ? .green : .secondary)
-              .frame(width: 18)
-
-            VStack(alignment: .leading, spacing: 2) {
-              Text(item.title)
-              Text(item.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            if item.id == "accessibility", !item.isReady {
-              Button("手动授权") { model.openAccessibilitySettings() }
-            }
-          }
+          ReadinessCard(item: item)
         }
       }
     }
   }
 
-  private var shortcutSection: some View {
-    SettingsSection(title: "快捷键") {
-      VStack(alignment: .leading, spacing: 10) {
-        Text("请将本软件快捷键设置为与豆包输入法的语音快捷键一致。本软件只负责切换输入法；点按、长按和语音结束由豆包输入法处理。")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
+  private var settingsSurface: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("设置")
+        .font(.headline)
 
-        HStack {
-          Text("语音输入快捷键")
-          Spacer()
+      VStack(spacing: 0) {
+        ControlRow(
+          systemImage: "keyboard",
+          title: "快捷键",
+          detail: "与豆包输入法保持一致"
+        ) {
           DoubaoShortcutPickerView(storageValue: $doubaoShortcutKeys)
         }
 
-        HStack {
-          VStack(alignment: .leading, spacing: 2) {
-            Text("长按判定时间")
-            Text("时间越短，长按响应越快；时间越长，越不容易把慢速单击识别成长按。")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
+        Divider()
 
-          Spacer()
-
+        ControlRow(
+          systemImage: "timer",
+          title: "长按判定",
+          detail: "时间越短响应越快；时间越长越不容易误判"
+        ) {
           Stepper(
             value: $longPressThresholdMilliseconds,
             in: LongPressThresholdPreference.minimumMilliseconds...LongPressThresholdPreference.maximumMilliseconds,
@@ -120,8 +112,56 @@ struct SettingsView: View {
               .frame(width: 64, alignment: .trailing)
           }
         }
+
+        Divider()
+
+        ControlRow(
+          systemImage: "power",
+          title: "开机自启动",
+          detail: "登录 macOS 后自动在菜单栏运行"
+        ) {
+          Toggle("", isOn: $launchAtLogin)
+            .labelsHidden()
+        }
+      }
+      .padding(.vertical, 4)
+      .background(.quaternary.opacity(0.32), in: RoundedRectangle(cornerRadius: 8))
+    }
+  }
+
+  private var logFooter: some View {
+    HStack(spacing: 12) {
+      VStack(alignment: .leading, spacing: 2) {
+        Text("日志")
+          .font(.headline)
+        Text("本地按天滚动，保留 7 天。")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      Spacer()
+
+      HStack(spacing: 8) {
+        Button("打开") { model.openLogFolder() }
+        Button("清空") { model.clearLogs() }
       }
     }
+    .padding(14)
+    .background(.quaternary.opacity(0.32), in: RoundedRectangle(cornerRadius: 8))
+  }
+
+  private var needsAccessibilityAuthorization: Bool {
+    model.prerequisites.contains { $0.id == "accessibility" && !$0.isReady }
+  }
+
+  private var commandHeaderMessage: String {
+    if needsAccessibilityAuthorization {
+      return "需要辅助功能权限后才能转发快捷键"
+    }
+    if model.status == .paused {
+      return "已暂停响应豆包语音快捷键"
+    }
+    return "长按或点按快捷键即可使用豆包语音输入"
   }
 
   private func normalizeLongPressThreshold() {
@@ -130,42 +170,6 @@ struct SettingsView: View {
       longPressThresholdMilliseconds = clampedMilliseconds
     }
     model.updateLongPressThresholdMilliseconds(clampedMilliseconds)
-  }
-
-  private var launchSection: some View {
-    SettingsSection(title: "启动") {
-      Toggle("开机自启动", isOn: $launchAtLogin)
-    }
-  }
-
-  private var diagnosticSection: some View {
-    SettingsSection(title: "诊断") {
-      VStack(alignment: .leading, spacing: 10) {
-        Text(model.diagnosticSummary)
-          .font(.system(.caption, design: .monospaced))
-          .foregroundStyle(.secondary)
-          .textSelection(.enabled)
-          .fixedSize(horizontal: false, vertical: true)
-
-        HStack {
-          Spacer()
-          Button("复制摘要") { model.copyDiagnosticSummary() }
-          Button("重新检测") { model.refreshReadiness() }
-        }
-      }
-    }
-  }
-
-  private var logSection: some View {
-    SettingsSection(title: "日志") {
-      HStack {
-        Text("本地日志按天滚动，保留 7 天。")
-          .foregroundStyle(.secondary)
-        Spacer()
-        Button("打开文件夹") { model.openLogFolder() }
-        Button("清空") { model.clearLogs() }
-      }
-    }
   }
 }
 
@@ -220,19 +224,78 @@ private struct DoubaoShortcutPickerView: View {
   }
 }
 
-private struct SettingsSection<Content: View>: View {
-  let title: String
-  @ViewBuilder let content: Content
+private struct StatusChip: View {
+  let status: AppStatus
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      Text(title)
-        .font(.headline)
-      VStack(alignment: .leading, spacing: 12) {
-        content
-      }
-      .padding(13)
-      .background(.quaternary.opacity(0.38), in: RoundedRectangle(cornerRadius: 8))
+    HStack(spacing: 5) {
+      Circle()
+        .fill(status.tint)
+        .frame(width: 6, height: 6)
+      Text(status.title)
+        .font(.caption.weight(.medium))
     }
+    .foregroundStyle(status.tint)
+    .padding(.horizontal, 9)
+    .padding(.vertical, 4)
+    .background(status.tint.opacity(0.12), in: Capsule())
+  }
+}
+
+private struct ReadinessCard: View {
+  let item: PrerequisiteItem
+
+  var body: some View {
+    HStack(alignment: .center, spacing: 10) {
+      Image(systemName: item.isReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+        .foregroundStyle(item.isReady ? .green : .orange)
+        .font(.system(size: 22))
+        .frame(width: 26)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text(item.title)
+          .font(.subheadline.weight(.semibold))
+        Text(item.detail)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(2)
+      }
+
+      Spacer()
+    }
+    .padding(13)
+    .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+    .background(.quaternary.opacity(0.32), in: RoundedRectangle(cornerRadius: 8))
+  }
+}
+
+private struct ControlRow<Control: View>: View {
+  let systemImage: String
+  let title: String
+  let detail: String
+  @ViewBuilder let control: Control
+
+  var body: some View {
+    HStack(alignment: .center, spacing: 13) {
+      Image(systemName: systemImage)
+        .foregroundStyle(.secondary)
+        .font(.system(size: 17, weight: .medium))
+        .frame(width: 22)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+          .font(.body.weight(.medium))
+        Text(detail)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+
+      Spacer(minLength: 16)
+
+      control
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 12)
   }
 }
