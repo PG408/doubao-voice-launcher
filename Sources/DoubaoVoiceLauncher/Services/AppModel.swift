@@ -40,6 +40,7 @@ final class AppModel: ObservableObject {
     self.probe = probe
     self.hotKeyService = hotKeyService
     self.logger = logger ?? DiagnosticLogger(logDirectory: defaultLogDirectory(), retentionDays: 7)
+    loadLongPressThresholdPreference()
     configureHotKeyCallbacks()
     recordLaunchSource()
     refreshReadiness()
@@ -89,6 +90,7 @@ final class AppModel: ObservableObject {
       "Accessibility: \(accessibilityTrusted)",
       "Doubao input source: \(doubaoInputSourceAvailable)",
       "Shortcut: \(storedShortcut.displayText)",
+      "Long press threshold: \(handoffController.longPressThresholdMilliseconds) ms",
       "Input source handoff active: \(isInputSourceHandoffActive)",
       "Last message: \(lastMessage)",
       "Last failure: \(lastFailureMessage ?? "none")",
@@ -154,6 +156,17 @@ final class AppModel: ObservableObject {
       hotKeyService.unregister()
       registeredShortcut = nil
     }
+  }
+
+  func updateLongPressThresholdMilliseconds(_ milliseconds: Int) {
+    let clampedMilliseconds = LongPressThresholdPreference.clamped(milliseconds)
+    guard handoffController.longPressThresholdMilliseconds != clampedMilliseconds else {
+      return
+    }
+
+    UserDefaults.standard.set(clampedMilliseconds, forKey: LongPressThresholdPreference.storageKey)
+    handoffController.updateLongPressThresholdMilliseconds(clampedMilliseconds)
+    record(.shortcut, "updated longPress threshold thresholdMs=\(clampedMilliseconds)")
   }
 
   func openAccessibilitySettings() {
@@ -293,8 +306,8 @@ final class AppModel: ObservableObject {
     switch forwardingPolicy.keyDownForwarding(startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff) {
     case .passThrough:
       return .passThrough
-    case let .defer(milliseconds):
-      return .deferForwarding(milliseconds: milliseconds)
+    case .captureForSyntheticForwarding:
+      return .captureForSyntheticForwarding
     }
   }
 
@@ -329,11 +342,13 @@ final class AppModel: ObservableObject {
     switch keyUpForwarding {
     case .passThrough:
       return .passThrough
-    case let .replayTap(keyDownDelayMilliseconds, keyUpGapMilliseconds):
-      return .replayDeferredTap(
-        keyDownDelayMilliseconds: keyDownDelayMilliseconds,
+    case let .replayTap(preflightKeyUpDelayMilliseconds, keyUpGapMilliseconds):
+      return .replaySyntheticTap(
+        preflightKeyUpDelayMilliseconds: preflightKeyUpDelayMilliseconds,
         keyUpGapMilliseconds: keyUpGapMilliseconds
       )
+    case .forwardSyntheticKeyUp:
+      return .forwardSyntheticKeyUp
     }
   }
 
@@ -351,9 +366,12 @@ final class AppModel: ObservableObject {
         self.pendingLongPressWorkItem = nil
         let stateBefore = self.handoffController.stateDescription
         let didTrigger = self.handoffController.shortcutLongPressThresholdReached()
+        let didForwardKeyDown = didTrigger && self.shortcutStartedFromInputSourceHandoff
+          ? self.hotKeyService.forwardCapturedKeyDown()
+          : false
         self.record(
           .shortcut,
-          "longPressThresholdReached thresholdMs=\(thresholdMilliseconds), triggered=\(didTrigger), handoffStateBefore=\(stateBefore), handoffStateAfter=\(self.handoffController.stateDescription)"
+          "longPressThresholdReached thresholdMs=\(thresholdMilliseconds), triggered=\(didTrigger), syntheticKeyDownForwarded=\(didForwardKeyDown), handoffStateBefore=\(stateBefore), handoffStateAfter=\(self.handoffController.stateDescription)"
         )
       }
     }
@@ -435,6 +453,14 @@ final class AppModel: ObservableObject {
 
   private var storedShortcut: DoubaoShortcut {
     DoubaoShortcut(storageValue: UserDefaults.standard.string(forKey: "doubaoShortcutKeys"))
+  }
+
+  private func loadLongPressThresholdPreference() {
+    let storedMilliseconds = UserDefaults.standard.object(forKey: LongPressThresholdPreference.storageKey) as? Int
+      ?? LongPressThresholdPreference.defaultMilliseconds
+    let clampedMilliseconds = LongPressThresholdPreference.clamped(storedMilliseconds)
+    UserDefaults.standard.set(clampedMilliseconds, forKey: LongPressThresholdPreference.storageKey)
+    handoffController.updateLongPressThresholdMilliseconds(clampedMilliseconds)
   }
 
   private func rememberRestorableInputSource(_ inputSource: InputSourceIdentity) {

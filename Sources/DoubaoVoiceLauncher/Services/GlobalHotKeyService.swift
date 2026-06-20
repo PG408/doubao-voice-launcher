@@ -12,8 +12,7 @@ final class GlobalHotKeyService {
   private var shortcut: DoubaoShortcut?
   private var isShortcutDown = false
   private var activeKeys: Set<DoubaoShortcutKey> = []
-  private var deferredKeyDownEvent: CGEvent?
-  private var deferredKeyDownWorkItem: DispatchWorkItem?
+  private var capturedKeyDownEvent: CGEvent?
 
   deinit {
     unregister()
@@ -68,9 +67,18 @@ final class GlobalHotKeyService {
     shortcut = nil
     isShortcutDown = false
     activeKeys = []
-    deferredKeyDownEvent = nil
-    deferredKeyDownWorkItem?.cancel()
-    deferredKeyDownWorkItem = nil
+    capturedKeyDownEvent = nil
+  }
+
+  @discardableResult
+  func forwardCapturedKeyDown() -> Bool {
+    guard let capturedKeyDownEvent else {
+      return false
+    }
+
+    self.capturedKeyDownEvent = nil
+    capturedKeyDownEvent.post(tap: .cghidEventTap)
+    return true
   }
 
   private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -135,65 +143,62 @@ final class GlobalHotKeyService {
     switch disposition {
     case .passThrough:
       return Unmanaged.passUnretained(event)
-    case let .deferForwarding(milliseconds):
-      deferForwarding(of: event, delayMilliseconds: milliseconds)
+    case .captureForSyntheticForwarding:
+      captureForSyntheticForwarding(event)
       return nil
-    case let .replayDeferredTap(keyDownDelayMilliseconds, keyUpGapMilliseconds):
-      replayDeferredTap(
+    case let .replaySyntheticTap(preflightKeyUpDelayMilliseconds, keyUpGapMilliseconds):
+      replaySyntheticTap(
         keyUpEvent: event,
-        keyDownDelayMilliseconds: keyDownDelayMilliseconds,
+        preflightKeyUpDelayMilliseconds: preflightKeyUpDelayMilliseconds,
         keyUpGapMilliseconds: keyUpGapMilliseconds
       )
       return nil
+    case .forwardSyntheticKeyUp:
+      forwardSyntheticKeyUp(event)
+      return nil
     }
   }
 
-  private func deferForwarding(of event: CGEvent, delayMilliseconds: Int) {
-    deferredKeyDownWorkItem?.cancel()
-    guard let replayEvent = event.copy() else {
+  private func captureForSyntheticForwarding(_ event: CGEvent) {
+    guard let capturedEvent = event.copy() else {
       return
     }
 
-    replayEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
-    deferredKeyDownEvent = replayEvent
-    let workItem = DispatchWorkItem { [weak self] in
-      guard let self,
-            let deferredKeyDownEvent = self.deferredKeyDownEvent else {
-        return
-      }
-
-      self.deferredKeyDownEvent = nil
-      self.deferredKeyDownWorkItem = nil
-      deferredKeyDownEvent.post(tap: .cghidEventTap)
-    }
-    deferredKeyDownWorkItem = workItem
-    DispatchQueue.main.asyncAfter(
-      deadline: .now() + .milliseconds(delayMilliseconds),
-      execute: workItem
-    )
+    capturedEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
+    capturedKeyDownEvent = capturedEvent
   }
 
-  private func replayDeferredTap(
+  private func replaySyntheticTap(
     keyUpEvent: CGEvent,
-    keyDownDelayMilliseconds: Int,
+    preflightKeyUpDelayMilliseconds: Int,
     keyUpGapMilliseconds: Int
   ) {
-    deferredKeyDownWorkItem?.cancel()
-    deferredKeyDownWorkItem = nil
-    guard let replayKeyDownEvent = deferredKeyDownEvent,
+    guard let replayKeyDownEvent = capturedKeyDownEvent,
+          let preflightKeyUpEvent = keyUpEvent.copy(),
           let replayKeyUpEvent = keyUpEvent.copy() else {
-      deferredKeyDownEvent = nil
+      capturedKeyDownEvent = nil
       return
     }
 
-    deferredKeyDownEvent = nil
+    capturedKeyDownEvent = nil
+    preflightKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
     replayKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
-    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(keyDownDelayMilliseconds)) {
+    preflightKeyUpEvent.post(tap: .cghidEventTap)
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(preflightKeyUpDelayMilliseconds)) {
       replayKeyDownEvent.post(tap: .cghidEventTap)
       DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(keyUpGapMilliseconds)) {
         replayKeyUpEvent.post(tap: .cghidEventTap)
       }
     }
+  }
+
+  private func forwardSyntheticKeyUp(_ event: CGEvent) {
+    guard let replayKeyUpEvent = event.copy() else {
+      return
+    }
+
+    replayKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
+    replayKeyUpEvent.post(tap: .cghidEventTap)
   }
 }
 
@@ -238,6 +243,7 @@ enum GlobalHotKeyError: Error, CustomStringConvertible {
 
 enum GlobalHotKeyEventDisposition: Equatable {
   case passThrough
-  case deferForwarding(milliseconds: Int)
-  case replayDeferredTap(keyDownDelayMilliseconds: Int, keyUpGapMilliseconds: Int)
+  case captureForSyntheticForwarding
+  case replaySyntheticTap(preflightKeyUpDelayMilliseconds: Int, keyUpGapMilliseconds: Int)
+  case forwardSyntheticKeyUp
 }

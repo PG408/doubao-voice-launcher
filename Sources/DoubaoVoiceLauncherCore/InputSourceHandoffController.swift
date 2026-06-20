@@ -15,15 +15,15 @@ public enum InputSourcePressKind: String, Equatable, Sendable {
 }
 
 public final class InputSourceHandoffController {
-  public let longPressThresholdMilliseconds: Int
+  public private(set) var longPressThresholdMilliseconds: Int
   private let longPressRestoreDelayMilliseconds: Int
   private var state: State = .idle
 
   public init(
-    longPressThresholdMilliseconds: Int = 500,
+    longPressThresholdMilliseconds: Int = LongPressThresholdPreference.defaultMilliseconds,
     longPressRestoreDelayMilliseconds: Int = 180
   ) {
-    self.longPressThresholdMilliseconds = longPressThresholdMilliseconds
+    self.longPressThresholdMilliseconds = LongPressThresholdPreference.clamped(longPressThresholdMilliseconds)
     self.longPressRestoreDelayMilliseconds = longPressRestoreDelayMilliseconds
   }
 
@@ -47,6 +47,10 @@ public final class InputSourceHandoffController {
       return true
     }
     return false
+  }
+
+  public func updateLongPressThresholdMilliseconds(_ milliseconds: Int) {
+    longPressThresholdMilliseconds = LongPressThresholdPreference.clamped(milliseconds)
   }
 
   public func shortcutBecameActive(

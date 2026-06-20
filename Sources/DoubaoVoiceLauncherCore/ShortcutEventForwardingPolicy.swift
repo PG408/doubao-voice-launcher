@@ -1,25 +1,23 @@
 public enum ShortcutKeyDownForwarding: Equatable, Sendable {
   case passThrough
-  case `defer`(milliseconds: Int)
+  case captureForSyntheticForwarding
 }
 
 public enum ShortcutKeyUpForwarding: Equatable, Sendable {
   case passThrough
-  case replayTap(keyDownDelayMilliseconds: Int, keyUpGapMilliseconds: Int)
+  case replayTap(preflightKeyUpDelayMilliseconds: Int, keyUpGapMilliseconds: Int)
+  case forwardSyntheticKeyUp
 }
 
 public struct ShortcutEventForwardingPolicy: Equatable, Sendable {
-  public let deferredKeyDownForwardingMilliseconds: Int
-  public let shortTapReplayKeyDownDelayMilliseconds: Int
+  public let shortTapPreflightKeyUpDelayMilliseconds: Int
   public let shortTapReplayKeyUpGapMilliseconds: Int
 
   public init(
-    deferredKeyDownForwardingMilliseconds: Int = 500,
-    shortTapReplayKeyDownDelayMilliseconds: Int = 180,
+    shortTapPreflightKeyUpDelayMilliseconds: Int = 50,
     shortTapReplayKeyUpGapMilliseconds: Int = 80
   ) {
-    self.deferredKeyDownForwardingMilliseconds = deferredKeyDownForwardingMilliseconds
-    self.shortTapReplayKeyDownDelayMilliseconds = shortTapReplayKeyDownDelayMilliseconds
+    self.shortTapPreflightKeyUpDelayMilliseconds = shortTapPreflightKeyUpDelayMilliseconds
     self.shortTapReplayKeyUpGapMilliseconds = shortTapReplayKeyUpGapMilliseconds
   }
 
@@ -30,7 +28,7 @@ public struct ShortcutEventForwardingPolicy: Equatable, Sendable {
       return .passThrough
     }
 
-    return .defer(milliseconds: deferredKeyDownForwardingMilliseconds)
+    return .captureForSyntheticForwarding
   }
 
   public func keyUpForwarding(
@@ -38,14 +36,20 @@ public struct ShortcutEventForwardingPolicy: Equatable, Sendable {
     releasePressKind: InputSourcePressKind?,
     pressDurationMilliseconds: Int
   ) -> ShortcutKeyUpForwarding {
-    guard startedFromInputSourceHandoff,
-          releasePressKind == .short else {
+    guard startedFromInputSourceHandoff else {
       return .passThrough
     }
 
-    return .replayTap(
-      keyDownDelayMilliseconds: shortTapReplayKeyDownDelayMilliseconds,
-      keyUpGapMilliseconds: shortTapReplayKeyUpGapMilliseconds
-    )
+    switch releasePressKind {
+    case .short:
+      return .replayTap(
+        preflightKeyUpDelayMilliseconds: shortTapPreflightKeyUpDelayMilliseconds,
+        keyUpGapMilliseconds: shortTapReplayKeyUpGapMilliseconds
+      )
+    case .long:
+      return .forwardSyntheticKeyUp
+    case nil:
+      return .passThrough
+    }
   }
 }

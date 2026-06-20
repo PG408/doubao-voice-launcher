@@ -5,6 +5,7 @@ struct SettingsView: View {
   @ObservedObject var model: AppModel
 
   @AppStorage("doubaoShortcutKeys") private var doubaoShortcutKeys = DoubaoShortcut(keys: DoubaoShortcut.defaultKeys).storageValue
+  @AppStorage(LongPressThresholdPreference.storageKey) private var longPressThresholdMilliseconds = LongPressThresholdPreference.defaultMilliseconds
   @AppStorage("launchAtLogin") private var launchAtLogin = false
 
   var body: some View {
@@ -21,11 +22,15 @@ struct SettingsView: View {
     .onChange(of: doubaoShortcutKeys) {
       model.updateGlobalShortcutRegistration()
     }
+    .onChange(of: longPressThresholdMilliseconds) {
+      normalizeLongPressThreshold()
+    }
     .onChange(of: launchAtLogin) {
       model.setLaunchAtLogin(launchAtLogin)
     }
     .onAppear {
       launchAtLogin = model.isLaunchAtLoginEnabled()
+      normalizeLongPressThreshold()
     }
   }
 
@@ -94,8 +99,37 @@ struct SettingsView: View {
           Spacer()
           DoubaoShortcutPickerView(storageValue: $doubaoShortcutKeys)
         }
+
+        HStack {
+          VStack(alignment: .leading, spacing: 2) {
+            Text("长按判定时间")
+            Text("时间越短，长按响应越快；时间越长，越不容易把慢速单击识别成长按。")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+
+          Spacer()
+
+          Stepper(
+            value: $longPressThresholdMilliseconds,
+            in: LongPressThresholdPreference.minimumMilliseconds...LongPressThresholdPreference.maximumMilliseconds,
+            step: 10
+          ) {
+            Text("\(longPressThresholdMilliseconds) ms")
+              .monospacedDigit()
+              .frame(width: 64, alignment: .trailing)
+          }
+        }
       }
     }
+  }
+
+  private func normalizeLongPressThreshold() {
+    let clampedMilliseconds = LongPressThresholdPreference.clamped(longPressThresholdMilliseconds)
+    if clampedMilliseconds != longPressThresholdMilliseconds {
+      longPressThresholdMilliseconds = clampedMilliseconds
+    }
+    model.updateLongPressThresholdMilliseconds(clampedMilliseconds)
   }
 
   private var launchSection: some View {

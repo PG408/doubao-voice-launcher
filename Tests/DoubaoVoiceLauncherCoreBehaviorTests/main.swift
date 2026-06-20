@@ -218,10 +218,44 @@ func testInputSourceHandoffDoesNotInferLongPressFromReleaseDuration() throws {
   )
 }
 
-func testShortcutForwardingDefersFirstHandoffKeyDownAndReplaysShortTap() throws {
+func testLongPressThresholdPreferenceClampsToSupportedRange() throws {
+  try expectEqual(
+    LongPressThresholdPreference.defaultMilliseconds,
+    100,
+    "长按判定时间默认值应保持当前体感较好的 100ms"
+  )
+  try expectEqual(
+    LongPressThresholdPreference.clamped(20),
+    50,
+    "长按判定时间不应低于 50ms"
+  )
+  try expectEqual(
+    LongPressThresholdPreference.clamped(640),
+    500,
+    "长按判定时间不应高于 500ms"
+  )
+  try expectEqual(
+    LongPressThresholdPreference.clamped(130),
+    130,
+    "长按判定时间范围内数值应保持不变"
+  )
+}
+
+func testInputSourceHandoffUpdatesLongPressThreshold() throws {
+  let controller = InputSourceHandoffController()
+
+  controller.updateLongPressThresholdMilliseconds(180)
+
+  try expectEqual(
+    controller.longPressThresholdMilliseconds,
+    180,
+    "设置页更新后状态机应使用新的长按判定时间"
+  )
+}
+
+func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() throws {
   let policy = ShortcutEventForwardingPolicy(
-    deferredKeyDownForwardingMilliseconds: 500,
-    shortTapReplayKeyDownDelayMilliseconds: 180,
+    shortTapPreflightKeyUpDelayMilliseconds: 50,
     shortTapReplayKeyUpGapMilliseconds: 80
   )
 
@@ -229,8 +263,8 @@ func testShortcutForwardingDefersFirstHandoffKeyDownAndReplaysShortTap() throws 
     policy.keyDownForwarding(
       startedFromInputSourceHandoff: true
     ),
-    .defer(milliseconds: 500),
-    "从非豆包切换时，首次 keyDown 应先拦截，避免豆包在激活窗口内进入长按启动路径"
+    .captureForSyntheticForwarding,
+    "从非豆包切换时，首次 keyDown 应只捕获，不应按固定 500ms 自动转发"
   )
   try expectEqual(
     policy.keyDownForwarding(
@@ -245,8 +279,8 @@ func testShortcutForwardingDefersFirstHandoffKeyDownAndReplaysShortTap() throws 
       releasePressKind: .short,
       pressDurationMilliseconds: 75
     ),
-    .replayTap(keyDownDelayMilliseconds: 180, keyUpGapMilliseconds: 80),
-    "从非豆包切换后的第一次短按应重放一组干净 tap，而不是只转发释放事件"
+    .replayTap(preflightKeyUpDelayMilliseconds: 50, keyUpGapMilliseconds: 80),
+    "从非豆包切换后的第一次短按应按豆包式 preflight keyUp -> keyDown -> keyUp 激活"
   )
   try expectEqual(
     policy.keyUpForwarding(
@@ -254,8 +288,8 @@ func testShortcutForwardingDefersFirstHandoffKeyDownAndReplaysShortTap() throws 
       releasePressKind: .long,
       pressDurationMilliseconds: 75
     ),
-    .passThrough,
-    "长按释放应直接放行；对应 keyDown 已由 defer timer 转发"
+    .forwardSyntheticKeyUp,
+    "长按释放应合成 keyUp；对应 keyDown 已由 longPress timer 命中后合成转发"
   )
   try expectEqual(
     policy.keyUpForwarding(
@@ -310,7 +344,9 @@ let tests: [(String, () throws -> Void)] = [
   ("testInputSourceHandoffRestoresOriginalInputSourceAfterSecondShortPress", testInputSourceHandoffRestoresOriginalInputSourceAfterSecondShortPress),
   ("testInputSourceHandoffUsesFallbackOriginalInputSourceWhenAlreadyUsingDoubao", testInputSourceHandoffUsesFallbackOriginalInputSourceWhenAlreadyUsingDoubao),
   ("testInputSourceHandoffDoesNotInferLongPressFromReleaseDuration", testInputSourceHandoffDoesNotInferLongPressFromReleaseDuration),
-  ("testShortcutForwardingDefersFirstHandoffKeyDownAndReplaysShortTap", testShortcutForwardingDefersFirstHandoffKeyDownAndReplaysShortTap),
+  ("testLongPressThresholdPreferenceClampsToSupportedRange", testLongPressThresholdPreferenceClampsToSupportedRange),
+  ("testInputSourceHandoffUpdatesLongPressThreshold", testInputSourceHandoffUpdatesLongPressThreshold),
+  ("testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions", testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions),
   ("testInputSourceHandoffBypassesWhenAlreadyUsingDoubaoInputSource", testInputSourceHandoffBypassesWhenAlreadyUsingDoubaoInputSource),
   ("testInputSourceHandoffDoesNotDuplicateSelectionWhileActive", testInputSourceHandoffDoesNotDuplicateSelectionWhileActive)
 ]
