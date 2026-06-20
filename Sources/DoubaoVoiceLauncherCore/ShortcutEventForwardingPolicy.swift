@@ -6,6 +6,7 @@ public enum ShortcutKeyDownForwarding: Equatable, Sendable {
 
 public enum ShortcutKeyUpForwarding: Equatable, Sendable {
   case passThrough
+  case suppress
   case startSyntheticHold
   case releaseSyntheticHold
   case forwardSyntheticKeyUp
@@ -16,8 +17,13 @@ public struct ShortcutEventForwardingPolicy: Equatable, Sendable {
 
   public func keyDownForwarding(
     startedFromInputSourceHandoff: Bool,
-    releasePressKind: InputSourcePressKind?
+    releasePressKind: InputSourcePressKind?,
+    isSuppressionWindowActive: Bool
   ) -> ShortcutKeyDownForwarding {
+    if isSuppressionWindowActive {
+      return .suppress
+    }
+
     if releasePressKind == .syntheticHoldRelease {
       return .suppress
     }
@@ -32,8 +38,13 @@ public struct ShortcutEventForwardingPolicy: Equatable, Sendable {
   public func keyUpForwarding(
     startedFromInputSourceHandoff: Bool,
     releasePressKind: InputSourcePressKind?,
-    pressDurationMilliseconds: Int
+    pressDurationMilliseconds: Int,
+    isSuppressionWindowActive: Bool
   ) -> ShortcutKeyUpForwarding {
+    if isSuppressionWindowActive, releasePressKind != .long {
+      return .suppress
+    }
+
     if releasePressKind == .syntheticHoldRelease {
       return .releaseSyntheticHold
     }

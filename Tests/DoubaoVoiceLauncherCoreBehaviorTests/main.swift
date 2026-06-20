@@ -264,7 +264,8 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
   try expectEqual(
     policy.keyDownForwarding(
       startedFromInputSourceHandoff: true,
-      releasePressKind: .short
+      releasePressKind: .short,
+      isSuppressionWindowActive: false
     ),
     .captureForSyntheticForwarding,
     "从非豆包切换时，首次 keyDown 应只捕获，不应按固定 500ms 自动转发"
@@ -272,7 +273,8 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
   try expectEqual(
     policy.keyDownForwarding(
       startedFromInputSourceHandoff: false,
-      releasePressKind: .short
+      releasePressKind: .short,
+      isSuppressionWindowActive: false
     ),
     .passThrough,
     "非输入法接力的 keyDown 应直接放行"
@@ -280,16 +282,27 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
   try expectEqual(
     policy.keyDownForwarding(
       startedFromInputSourceHandoff: false,
-      releasePressKind: .syntheticHoldRelease
+      releasePressKind: .syntheticHoldRelease,
+      isSuppressionWindowActive: false
     ),
     .suppress,
     "第二次短按用于释放合成持有，物理 keyDown 不应透传给豆包"
   )
   try expectEqual(
+    policy.keyDownForwarding(
+      startedFromInputSourceHandoff: false,
+      releasePressKind: nil,
+      isSuppressionWindowActive: true
+    ),
+    .suppress,
+    "兜底窗口内的新快捷键 keyDown 应被完全忽略"
+  )
+  try expectEqual(
     policy.keyUpForwarding(
       startedFromInputSourceHandoff: true,
       releasePressKind: .short,
-      pressDurationMilliseconds: 75
+      pressDurationMilliseconds: 75,
+      isSuppressionWindowActive: false
     ),
     .startSyntheticHold,
     "从非豆包切换后的第一次短按应启动合成持有，不应立即补发 keyUp"
@@ -298,25 +311,38 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
     policy.keyUpForwarding(
       startedFromInputSourceHandoff: false,
       releasePressKind: .syntheticHoldRelease,
-      pressDurationMilliseconds: 75
+      pressDurationMilliseconds: 75,
+      isSuppressionWindowActive: false
     ),
     .releaseSyntheticHold,
     "第二次短按释放应补发 synthetic keyUp 结束合成持有"
   )
   try expectEqual(
     policy.keyUpForwarding(
+      startedFromInputSourceHandoff: false,
+      releasePressKind: nil,
+      pressDurationMilliseconds: 75,
+      isSuppressionWindowActive: true
+    ),
+    .suppress,
+    "兜底窗口内的新快捷键 keyUp 应被完全忽略"
+  )
+  try expectEqual(
+    policy.keyUpForwarding(
       startedFromInputSourceHandoff: true,
       releasePressKind: .long,
-      pressDurationMilliseconds: 75
+      pressDurationMilliseconds: 75,
+      isSuppressionWindowActive: true
     ),
     .forwardSyntheticKeyUp,
-    "长按释放应合成 keyUp；对应 keyDown 已由 longPress timer 命中后合成转发"
+    "长按本次真实释放不能被兜底窗口拦截，否则会造成合成按键卡住"
   )
   try expectEqual(
     policy.keyUpForwarding(
       startedFromInputSourceHandoff: false,
       releasePressKind: .short,
-      pressDurationMilliseconds: 75
+      pressDurationMilliseconds: 75,
+      isSuppressionWindowActive: false
     ),
     .passThrough,
     "非输入法接力产生的短按释放应直接放行"

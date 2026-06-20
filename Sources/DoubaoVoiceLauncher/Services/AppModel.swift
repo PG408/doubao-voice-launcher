@@ -18,12 +18,14 @@ final class AppModel: ObservableObject {
   private let handoffController = InputSourceHandoffController()
   private let forwardingPolicy = ShortcutEventForwardingPolicy()
   private let launchAtLoginService = LaunchAtLoginService()
+  private let shortcutSuppressionMilliseconds = 300
 
   private var readinessTimer: Timer?
   private var registeredShortcut: DoubaoShortcut?
   private var pendingRestoreWorkItem: DispatchWorkItem?
   private var pendingLongPressWorkItem: DispatchWorkItem?
   private var shortcutDownDate: Date?
+  private var shortcutSuppressionUntil: Date?
   private var shortcutStartedFromInputSourceHandoff = false
   private var lastRestorableInputSourceID: String?
   private var lastLoggedStatus: AppStatus?
@@ -254,11 +256,20 @@ final class AppModel: ObservableObject {
       return .passThrough
     }
 
+    let now = Date()
+    if isShortcutSuppressionActive(at: now) {
+      record(
+        .shortcut,
+        "shortcut ignored by suppression window event=keyDown, shortcut=\(shortcut.displayText), handoffState=\(handoffController.stateDescription)"
+      )
+      return .suppress
+    }
+
     pendingRestoreWorkItem?.cancel()
     pendingRestoreWorkItem = nil
     pendingLongPressWorkItem?.cancel()
     pendingLongPressWorkItem = nil
-    shortcutDownDate = Date()
+    shortcutDownDate = now
     let stateBefore = handoffController.stateDescription
     let currentInputSource = inputSourceService.currentInputSource()
     rememberRestorableInputSource(currentInputSource)
@@ -275,7 +286,8 @@ final class AppModel: ObservableObject {
     let releasePressKind = handoffController.releasePressKind
     let keyDownForwarding = forwardingPolicy.keyDownForwarding(
       startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff,
-      releasePressKind: releasePressKind
+      releasePressKind: releasePressKind,
+      isSuppressionWindowActive: false
     )
     record(
       .shortcut,
@@ -299,19 +311,29 @@ final class AppModel: ObservableObject {
     }
 
     let now = Date()
+    let releasePressKind = handoffController.releasePressKind
+    let isSuppressionActive = isShortcutSuppressionActive(at: now)
     let pressDurationMilliseconds = shortcutDownDate.map {
       max(0, Int(now.timeIntervalSince($0) * 1000))
     } ?? 0
+    let keyUpForwarding = forwardingPolicy.keyUpForwarding(
+      startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff,
+      releasePressKind: releasePressKind,
+      pressDurationMilliseconds: pressDurationMilliseconds,
+      isSuppressionWindowActive: isSuppressionActive
+    )
+    if keyUpForwarding == .suppress {
+      record(
+        .shortcut,
+        "shortcut ignored by suppression window event=keyUp, durationMs=\(pressDurationMilliseconds), releasePressKind=\(releasePressKind?.rawValue ?? "none"), handoffState=\(handoffController.stateDescription)"
+      )
+      return .suppress
+    }
+
     shortcutDownDate = nil
     pendingLongPressWorkItem?.cancel()
     pendingLongPressWorkItem = nil
 
-    let releasePressKind = handoffController.releasePressKind
-    let keyUpForwarding = forwardingPolicy.keyUpForwarding(
-      startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff,
-      releasePressKind: releasePressKind,
-      pressDurationMilliseconds: pressDurationMilliseconds
-    )
     let pressKind = releasePressKind?.rawValue ?? "none"
     let stateBefore = handoffController.stateDescription
     let actions = handoffController.shortcutBecameInactive()
@@ -324,7 +346,10 @@ final class AppModel: ObservableObject {
     switch keyUpForwarding {
     case .passThrough:
       return .passThrough
+    case .suppress:
+      return .suppress
     case .startSyntheticHold:
+      startShortcutSuppressionWindow(reason: "startSyntheticHold", now: now)
       return .startSyntheticHold
     case .releaseSyntheticHold:
       return .releaseSyntheticHold
@@ -350,6 +375,9 @@ final class AppModel: ObservableObject {
         let didForwardKeyDown = didTrigger && self.shortcutStartedFromInputSourceHandoff
           ? self.hotKeyService.forwardCapturedKeyDown()
           : false
+        if didForwardKeyDown {
+          self.startShortcutSuppressionWindow(reason: "longPressSyntheticKeyDown", now: Date())
+        }
         self.record(
           .shortcut,
           "longPressThresholdReached thresholdMs=\(thresholdMilliseconds), triggered=\(didTrigger), syntheticKeyDownForwarded=\(didForwardKeyDown), handoffStateBefore=\(stateBefore), handoffStateAfter=\(self.handoffController.stateDescription)"
@@ -360,6 +388,27 @@ final class AppModel: ObservableObject {
     DispatchQueue.main.asyncAfter(
       deadline: .now() + .milliseconds(thresholdMilliseconds),
       execute: workItem
+    )
+  }
+
+  private func isShortcutSuppressionActive(at now: Date) -> Bool {
+    guard let shortcutSuppressionUntil else {
+      return false
+    }
+
+    if now < shortcutSuppressionUntil {
+      return true
+    }
+
+    self.shortcutSuppressionUntil = nil
+    return false
+  }
+
+  private func startShortcutSuppressionWindow(reason: String, now: Date) {
+    shortcutSuppressionUntil = now.addingTimeInterval(Double(shortcutSuppressionMilliseconds) / 1000)
+    record(
+      .shortcut,
+      "started shortcut suppression window durationMs=\(shortcutSuppressionMilliseconds), reason=\(reason)"
     )
   }
 
