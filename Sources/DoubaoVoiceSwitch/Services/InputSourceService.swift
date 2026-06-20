@@ -1,5 +1,5 @@
 import Carbon
-import DoubaoVoiceLauncherCore
+import DoubaoVoiceSwitchCore
 import Foundation
 
 struct InputSourceService {

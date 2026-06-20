@@ -3,29 +3,29 @@
 import PackageDescription
 
 let package = Package(
-  name: "DoubaoVoiceLauncher",
+  name: "DoubaoVoiceSwitch",
   platforms: [
     .macOS(.v14)
   ],
   products: [
-    .executable(name: "DoubaoVoiceLauncher", targets: ["DoubaoVoiceLauncher"]),
-    .library(name: "DoubaoVoiceLauncherCore", targets: ["DoubaoVoiceLauncherCore"]),
+    .executable(name: "DoubaoVoiceSwitch", targets: ["DoubaoVoiceSwitch"]),
+    .library(name: "DoubaoVoiceSwitchCore", targets: ["DoubaoVoiceSwitchCore"]),
     .executable(
-      name: "DoubaoVoiceLauncherCoreBehaviorTests",
-      targets: ["DoubaoVoiceLauncherCoreBehaviorTests"]
+      name: "DoubaoVoiceSwitchCoreBehaviorTests",
+      targets: ["DoubaoVoiceSwitchCoreBehaviorTests"]
     )
   ],
   targets: [
     .executableTarget(
-      name: "DoubaoVoiceLauncher",
-      dependencies: ["DoubaoVoiceLauncherCore"],
+      name: "DoubaoVoiceSwitch",
+      dependencies: ["DoubaoVoiceSwitchCore"],
       resources: [.copy("Resources")]
     ),
-    .target(name: "DoubaoVoiceLauncherCore"),
+    .target(name: "DoubaoVoiceSwitchCore"),
     .executableTarget(
-      name: "DoubaoVoiceLauncherCoreBehaviorTests",
-      dependencies: ["DoubaoVoiceLauncherCore"],
-      path: "Tests/DoubaoVoiceLauncherCoreBehaviorTests"
+      name: "DoubaoVoiceSwitchCoreBehaviorTests",
+      dependencies: ["DoubaoVoiceSwitchCore"],
+      path: "Tests/DoubaoVoiceSwitchCoreBehaviorTests"
     )
   ]
 )

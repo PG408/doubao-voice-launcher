@@ -1,5 +1,5 @@
 import ApplicationServices
-import DoubaoVoiceLauncherCore
+import DoubaoVoiceSwitchCore
 import Foundation
 
 final class GlobalHotKeyService {
@@ -268,7 +268,7 @@ enum GlobalHotKeyError: Error, CustomStringConvertible {
   var description: String {
     switch self {
     case .eventTapInstallFailed:
-      return "Global shortcut event tap install failed. Manually grant Accessibility permission to DoubaoVoiceLauncher."
+      return "Global shortcut event tap install failed. Manually grant Accessibility permission to DoubaoVoiceSwitch."
     }
   }
 }

@@ -1,4 +1,4 @@
-import DoubaoVoiceLauncherCore
+import DoubaoVoiceSwitchCore
 import Foundation
 
 struct TestFailure: Error, CustomStringConvertible {

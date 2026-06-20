@@ -1,4 +1,4 @@
-import DoubaoVoiceLauncherCore
+import DoubaoVoiceSwitchCore
 import AppKit
 import SwiftUI
 

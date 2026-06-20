@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成 DoubaoVoiceLauncher 的 macOS app icon。"""
+"""生成 DoubaoVoiceSwitch 的 macOS app icon。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RESOURCE_DIR = ROOT / "Sources" / "DoubaoVoiceLauncher" / "Resources"
+RESOURCE_DIR = ROOT / "Sources" / "DoubaoVoiceSwitch" / "Resources"
 ICONSET_DIR = RESOURCE_DIR / "AppIcon.iconset"
 ICON_FILE = RESOURCE_DIR / "AppIcon.icns"
 SOURCE_PNG = RESOURCE_DIR / "AppIcon-1024.png"

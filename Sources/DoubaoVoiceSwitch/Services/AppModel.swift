@@ -1,5 +1,5 @@
 import AppKit
-import DoubaoVoiceLauncherCore
+import DoubaoVoiceSwitchCore
 import Foundation
 
 @MainActor
@@ -536,6 +536,6 @@ private func defaultLogDirectory() -> URL {
     ?? FileManager.default.temporaryDirectory
 
   return base
-    .appendingPathComponent("DoubaoVoiceLauncher", isDirectory: true)
+    .appendingPathComponent("DoubaoVoiceSwitch", isDirectory: true)
     .appendingPathComponent("Logs", isDirectory: true)
 }

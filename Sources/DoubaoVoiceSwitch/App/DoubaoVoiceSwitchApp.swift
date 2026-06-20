@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @main
-struct DoubaoVoiceLauncherApp: App {
+struct DoubaoVoiceSwitchApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @StateObject private var model = AppModel.shared
 

@@ -1,4 +1,4 @@
-import DoubaoVoiceLauncherCore
+import DoubaoVoiceSwitchCore
 import SwiftUI
 
 struct SettingsView: View {
