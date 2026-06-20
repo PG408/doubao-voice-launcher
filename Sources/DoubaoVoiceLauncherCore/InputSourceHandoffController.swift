@@ -12,6 +12,7 @@ public enum InputSourceRestoreReason: String, Equatable, Sendable {
 public enum InputSourcePressKind: String, Equatable, Sendable {
   case short
   case long
+  case syntheticHoldRelease
 }
 
 public final class InputSourceHandoffController {
@@ -35,9 +36,11 @@ public final class InputSourceHandoffController {
     switch state {
     case .longPressActive:
       return .long
-    case .handoffKeyDown, .shortClickStopKeyDown:
+    case .handoffKeyDown:
       return .short
-    case .idle, .shortClickVoiceActive:
+    case .shortClickSyntheticHoldStopKeyDown:
+      return .syntheticHoldRelease
+    case .idle, .shortClickSyntheticHoldActive:
       return nil
     }
   }
@@ -66,10 +69,10 @@ public final class InputSourceHandoffController {
 
       state = .handoffKeyDown(originalInputSourceID: restorationID)
       return currentInputSource.restorationID == nil ? [] : [.selectDoubaoInputSource]
-    case let .shortClickVoiceActive(originalInputSourceID):
-      state = .shortClickStopKeyDown(originalInputSourceID: originalInputSourceID)
+    case let .shortClickSyntheticHoldActive(originalInputSourceID):
+      state = .shortClickSyntheticHoldStopKeyDown(originalInputSourceID: originalInputSourceID)
       return []
-    case .handoffKeyDown, .longPressActive, .shortClickStopKeyDown:
+    case .handoffKeyDown, .longPressActive, .shortClickSyntheticHoldStopKeyDown:
       return []
     }
   }
@@ -86,7 +89,7 @@ public final class InputSourceHandoffController {
   public func shortcutBecameInactive() -> [InputSourceHandoffAction] {
     switch state {
     case let .handoffKeyDown(originalInputSourceID):
-      state = .shortClickVoiceActive(originalInputSourceID: originalInputSourceID)
+      state = .shortClickSyntheticHoldActive(originalInputSourceID: originalInputSourceID)
       return []
     case let .longPressActive(originalInputSourceID):
       state = .idle
@@ -97,7 +100,7 @@ public final class InputSourceHandoffController {
           reason: .longPressRelease
         )
       ]
-    case let .shortClickStopKeyDown(originalInputSourceID):
+    case let .shortClickSyntheticHoldStopKeyDown(originalInputSourceID):
       state = .idle
       return [
         .scheduleRestoreInputSource(
@@ -106,7 +109,7 @@ public final class InputSourceHandoffController {
           reason: .secondShortClickRelease
         )
       ]
-    case .idle, .shortClickVoiceActive:
+    case .idle, .shortClickSyntheticHoldActive:
       return []
     }
   }
@@ -131,8 +134,8 @@ private enum State {
   case idle
   case handoffKeyDown(originalInputSourceID: String)
   case longPressActive(originalInputSourceID: String)
-  case shortClickVoiceActive(originalInputSourceID: String)
-  case shortClickStopKeyDown(originalInputSourceID: String)
+  case shortClickSyntheticHoldActive(originalInputSourceID: String)
+  case shortClickSyntheticHoldStopKeyDown(originalInputSourceID: String)
 
   var originalInputSourceID: String? {
     switch self {
@@ -140,8 +143,8 @@ private enum State {
       return nil
     case let .handoffKeyDown(originalInputSourceID),
          let .longPressActive(originalInputSourceID),
-         let .shortClickVoiceActive(originalInputSourceID),
-         let .shortClickStopKeyDown(originalInputSourceID):
+         let .shortClickSyntheticHoldActive(originalInputSourceID),
+         let .shortClickSyntheticHoldStopKeyDown(originalInputSourceID):
       return originalInputSourceID
     }
   }
@@ -154,10 +157,10 @@ private enum State {
       return "handoffKeyDown"
     case .longPressActive:
       return "longPressActive"
-    case .shortClickVoiceActive:
-      return "shortClickVoiceActive"
-    case .shortClickStopKeyDown:
-      return "shortClickStopKeyDown"
+    case .shortClickSyntheticHoldActive:
+      return "shortClickSyntheticHoldActive"
+    case .shortClickSyntheticHoldStopKeyDown:
+      return "shortClickSyntheticHoldStopKeyDown"
     }
   }
 }

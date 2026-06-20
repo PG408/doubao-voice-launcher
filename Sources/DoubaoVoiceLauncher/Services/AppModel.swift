@@ -189,10 +189,21 @@ final class AppModel: ObservableObject {
   }
 
   func restoreInputSourceIfNeeded(reason: String) {
+    if hotKeyService.releaseSyntheticHoldIfNeeded() {
+      record(.shortcut, "released synthetic hold, releaseReason=\(reason)")
+    }
     applyHandoffActions(handoffController.cancelHandoff(), reason: reason)
   }
 
   private func configureHotKeyCallbacks() {
+    hotKeyService.onShortcutEventObserved = { [weak self] event in
+      MainActor.assumeIsolated {
+        guard let self, self.status == .running else {
+          return
+        }
+        self.record(.shortcut, event.message)
+      }
+    }
     hotKeyService.onKeyDown = { [weak self] shortcut in
       MainActor.assumeIsolated {
         self?.handleGlobalShortcutKeyDown(shortcut: shortcut) ?? .passThrough
@@ -261,17 +272,24 @@ final class AppModel: ObservableObject {
       }
       return false
     }
+    let releasePressKind = handoffController.releasePressKind
+    let keyDownForwarding = forwardingPolicy.keyDownForwarding(
+      startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff,
+      releasePressKind: releasePressKind
+    )
     record(
       .shortcut,
-      "keyDown \(shortcut.displayText), keys=\(shortcut.storageValue), currentInputSource=\(currentInputSource), fallbackOriginalInputSourceID=\(lastRestorableInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffStateAfter=\(handoffController.stateDescription), startedFromInputSourceHandoff=\(shortcutStartedFromInputSourceHandoff), keyDownForwarding=\(forwardingPolicy.keyDownForwarding(startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff))"
+      "keyDown \(shortcut.displayText), keys=\(shortcut.storageValue), currentInputSource=\(currentInputSource), fallbackOriginalInputSourceID=\(lastRestorableInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffStateAfter=\(handoffController.stateDescription), startedFromInputSourceHandoff=\(shortcutStartedFromInputSourceHandoff), keyDownForwarding=\(keyDownForwarding)"
     )
     scheduleLongPressThresholdIfNeeded()
     applyHandoffActions(actions, reason: "shortcut keyDown")
-    switch forwardingPolicy.keyDownForwarding(startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff) {
+    switch keyDownForwarding {
     case .passThrough:
       return .passThrough
     case .captureForSyntheticForwarding:
       return .captureForSyntheticForwarding
+    case .suppress:
+      return .suppress
     }
   }
 
@@ -306,11 +324,10 @@ final class AppModel: ObservableObject {
     switch keyUpForwarding {
     case .passThrough:
       return .passThrough
-    case let .replayTap(preflightKeyUpDelayMilliseconds, keyUpGapMilliseconds):
-      return .replaySyntheticTap(
-        preflightKeyUpDelayMilliseconds: preflightKeyUpDelayMilliseconds,
-        keyUpGapMilliseconds: keyUpGapMilliseconds
-      )
+    case .startSyntheticHold:
+      return .startSyntheticHold
+    case .releaseSyntheticHold:
+      return .releaseSyntheticHold
     case .forwardSyntheticKeyUp:
       return .forwardSyntheticKeyUp
     }

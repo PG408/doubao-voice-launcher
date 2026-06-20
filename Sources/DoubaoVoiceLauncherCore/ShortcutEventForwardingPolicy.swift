@@ -1,29 +1,27 @@
 public enum ShortcutKeyDownForwarding: Equatable, Sendable {
   case passThrough
   case captureForSyntheticForwarding
+  case suppress
 }
 
 public enum ShortcutKeyUpForwarding: Equatable, Sendable {
   case passThrough
-  case replayTap(preflightKeyUpDelayMilliseconds: Int, keyUpGapMilliseconds: Int)
+  case startSyntheticHold
+  case releaseSyntheticHold
   case forwardSyntheticKeyUp
 }
 
 public struct ShortcutEventForwardingPolicy: Equatable, Sendable {
-  public let shortTapPreflightKeyUpDelayMilliseconds: Int
-  public let shortTapReplayKeyUpGapMilliseconds: Int
-
-  public init(
-    shortTapPreflightKeyUpDelayMilliseconds: Int = 50,
-    shortTapReplayKeyUpGapMilliseconds: Int = 80
-  ) {
-    self.shortTapPreflightKeyUpDelayMilliseconds = shortTapPreflightKeyUpDelayMilliseconds
-    self.shortTapReplayKeyUpGapMilliseconds = shortTapReplayKeyUpGapMilliseconds
-  }
+  public init() {}
 
   public func keyDownForwarding(
-    startedFromInputSourceHandoff: Bool
+    startedFromInputSourceHandoff: Bool,
+    releasePressKind: InputSourcePressKind?
   ) -> ShortcutKeyDownForwarding {
+    if releasePressKind == .syntheticHoldRelease {
+      return .suppress
+    }
+
     guard startedFromInputSourceHandoff else {
       return .passThrough
     }
@@ -36,18 +34,21 @@ public struct ShortcutEventForwardingPolicy: Equatable, Sendable {
     releasePressKind: InputSourcePressKind?,
     pressDurationMilliseconds: Int
   ) -> ShortcutKeyUpForwarding {
+    if releasePressKind == .syntheticHoldRelease {
+      return .releaseSyntheticHold
+    }
+
     guard startedFromInputSourceHandoff else {
       return .passThrough
     }
 
     switch releasePressKind {
     case .short:
-      return .replayTap(
-        preflightKeyUpDelayMilliseconds: shortTapPreflightKeyUpDelayMilliseconds,
-        keyUpGapMilliseconds: shortTapReplayKeyUpGapMilliseconds
-      )
+      return .startSyntheticHold
     case .long:
       return .forwardSyntheticKeyUp
+    case .syntheticHoldRelease:
+      return .releaseSyntheticHold
     case nil:
       return .passThrough
     }

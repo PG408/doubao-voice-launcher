@@ -160,6 +160,11 @@ func testInputSourceHandoffRestoresOriginalInputSourceAfterSecondShortPress() th
 
   _ = controller.shortcutBecameActive(currentInputSource: .other("com.apple.inputmethod.SCIM.ITABC"))
   _ = controller.shortcutBecameInactive()
+  try expectEqual(
+    controller.stateDescription,
+    "shortClickSyntheticHoldActive",
+    "第一次短按释放后应进入合成持有状态"
+  )
   _ = controller.shortcutBecameActive(currentInputSource: .doubao)
 
   try expectEqual(
@@ -254,24 +259,31 @@ func testInputSourceHandoffUpdatesLongPressThreshold() throws {
 }
 
 func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() throws {
-  let policy = ShortcutEventForwardingPolicy(
-    shortTapPreflightKeyUpDelayMilliseconds: 50,
-    shortTapReplayKeyUpGapMilliseconds: 80
-  )
+  let policy = ShortcutEventForwardingPolicy()
 
   try expectEqual(
     policy.keyDownForwarding(
-      startedFromInputSourceHandoff: true
+      startedFromInputSourceHandoff: true,
+      releasePressKind: .short
     ),
     .captureForSyntheticForwarding,
     "从非豆包切换时，首次 keyDown 应只捕获，不应按固定 500ms 自动转发"
   )
   try expectEqual(
     policy.keyDownForwarding(
-      startedFromInputSourceHandoff: false
+      startedFromInputSourceHandoff: false,
+      releasePressKind: .short
     ),
     .passThrough,
     "非输入法接力的 keyDown 应直接放行"
+  )
+  try expectEqual(
+    policy.keyDownForwarding(
+      startedFromInputSourceHandoff: false,
+      releasePressKind: .syntheticHoldRelease
+    ),
+    .suppress,
+    "第二次短按用于释放合成持有，物理 keyDown 不应透传给豆包"
   )
   try expectEqual(
     policy.keyUpForwarding(
@@ -279,8 +291,17 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
       releasePressKind: .short,
       pressDurationMilliseconds: 75
     ),
-    .replayTap(preflightKeyUpDelayMilliseconds: 50, keyUpGapMilliseconds: 80),
-    "从非豆包切换后的第一次短按应按豆包式 preflight keyUp -> keyDown -> keyUp 激活"
+    .startSyntheticHold,
+    "从非豆包切换后的第一次短按应启动合成持有，不应立即补发 keyUp"
+  )
+  try expectEqual(
+    policy.keyUpForwarding(
+      startedFromInputSourceHandoff: false,
+      releasePressKind: .syntheticHoldRelease,
+      pressDurationMilliseconds: 75
+    ),
+    .releaseSyntheticHold,
+    "第二次短按释放应补发 synthetic keyUp 结束合成持有"
   )
   try expectEqual(
     policy.keyUpForwarding(

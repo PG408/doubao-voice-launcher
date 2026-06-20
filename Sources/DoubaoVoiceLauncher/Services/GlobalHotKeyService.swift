@@ -5,6 +5,7 @@ import Foundation
 final class GlobalHotKeyService {
   var onKeyDown: ((DoubaoShortcut) -> GlobalHotKeyEventDisposition)?
   var onKeyUp: (() -> GlobalHotKeyEventDisposition)?
+  var onShortcutEventObserved: ((GlobalHotKeyEventLog) -> Void)?
 
   fileprivate static let delayedReplayUserData: Int64 = 0x4442_564c_4b55_5001
   private var eventTap: CFMachPort?
@@ -13,6 +14,7 @@ final class GlobalHotKeyService {
   private var isShortcutDown = false
   private var activeKeys: Set<DoubaoShortcutKey> = []
   private var capturedKeyDownEvent: CGEvent?
+  private var syntheticHoldKeyUpEvent: CGEvent?
 
   deinit {
     unregister()
@@ -54,6 +56,7 @@ final class GlobalHotKeyService {
   }
 
   func unregister() {
+    releaseSyntheticHoldIfNeeded()
     if let runLoopSource {
       CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
       self.runLoopSource = nil
@@ -68,6 +71,7 @@ final class GlobalHotKeyService {
     isShortcutDown = false
     activeKeys = []
     capturedKeyDownEvent = nil
+    syntheticHoldKeyUpEvent = nil
   }
 
   @discardableResult
@@ -81,11 +85,18 @@ final class GlobalHotKeyService {
     return true
   }
 
-  private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-    if event.isDelayedReplayEvent {
-      return Unmanaged.passUnretained(event)
+  @discardableResult
+  func releaseSyntheticHoldIfNeeded() -> Bool {
+    guard let syntheticHoldKeyUpEvent else {
+      return false
     }
 
+    self.syntheticHoldKeyUpEvent = nil
+    syntheticHoldKeyUpEvent.post(tap: .cghidEventTap)
+    return true
+  }
+
+  private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
     guard type == .flagsChanged else {
       return Unmanaged.passUnretained(event)
     }
@@ -98,8 +109,26 @@ final class GlobalHotKeyService {
       return Unmanaged.passUnretained(event)
     }
 
+    if event.isDelayedReplayEvent {
+      onShortcutEventObserved?(event.logEvent(
+        type: type,
+        activeKeys: activeKeys,
+        isActiveShortcut: shortcut.matches(activeKeys: activeKeys),
+        isShortcutDown: isShortcutDown,
+        note: "ignoredDelayedReplay"
+      ))
+      return Unmanaged.passUnretained(event)
+    }
+
     updateActiveKeys(event: event)
     let isActiveShortcut = shortcut.matches(activeKeys: activeKeys)
+    onShortcutEventObserved?(event.logEvent(
+      type: type,
+      activeKeys: activeKeys,
+      isActiveShortcut: isActiveShortcut,
+      isShortcutDown: isShortcutDown,
+      note: nil
+    ))
 
     if isActiveShortcut, !isShortcutDown {
       isShortcutDown = true
@@ -146,12 +175,13 @@ final class GlobalHotKeyService {
     case .captureForSyntheticForwarding:
       captureForSyntheticForwarding(event)
       return nil
-    case let .replaySyntheticTap(preflightKeyUpDelayMilliseconds, keyUpGapMilliseconds):
-      replaySyntheticTap(
-        keyUpEvent: event,
-        preflightKeyUpDelayMilliseconds: preflightKeyUpDelayMilliseconds,
-        keyUpGapMilliseconds: keyUpGapMilliseconds
-      )
+    case .suppress:
+      return nil
+    case .startSyntheticHold:
+      startSyntheticHold(keyUpEvent: event)
+      return nil
+    case .releaseSyntheticHold:
+      releaseSyntheticHold(fallbackKeyUpEvent: event)
       return nil
     case .forwardSyntheticKeyUp:
       forwardSyntheticKeyUp(event)
@@ -168,28 +198,30 @@ final class GlobalHotKeyService {
     capturedKeyDownEvent = capturedEvent
   }
 
-  private func replaySyntheticTap(
-    keyUpEvent: CGEvent,
-    preflightKeyUpDelayMilliseconds: Int,
-    keyUpGapMilliseconds: Int
-  ) {
+  private func startSyntheticHold(keyUpEvent: CGEvent) {
     guard let replayKeyDownEvent = capturedKeyDownEvent,
-          let preflightKeyUpEvent = keyUpEvent.copy(),
           let replayKeyUpEvent = keyUpEvent.copy() else {
       capturedKeyDownEvent = nil
       return
     }
 
     capturedKeyDownEvent = nil
-    preflightKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
     replayKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
-    preflightKeyUpEvent.post(tap: .cghidEventTap)
-    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(preflightKeyUpDelayMilliseconds)) {
-      replayKeyDownEvent.post(tap: .cghidEventTap)
-      DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(keyUpGapMilliseconds)) {
-        replayKeyUpEvent.post(tap: .cghidEventTap)
-      }
+    syntheticHoldKeyUpEvent = replayKeyUpEvent
+    replayKeyDownEvent.post(tap: .cghidEventTap)
+  }
+
+  private func releaseSyntheticHold(fallbackKeyUpEvent: CGEvent) {
+    if releaseSyntheticHoldIfNeeded() {
+      return
     }
+
+    guard let replayKeyUpEvent = fallbackKeyUpEvent.copy() else {
+      return
+    }
+
+    replayKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
+    replayKeyUpEvent.post(tap: .cghidEventTap)
   }
 
   private func forwardSyntheticKeyUp(_ event: CGEvent) {
@@ -244,6 +276,63 @@ enum GlobalHotKeyError: Error, CustomStringConvertible {
 enum GlobalHotKeyEventDisposition: Equatable {
   case passThrough
   case captureForSyntheticForwarding
-  case replaySyntheticTap(preflightKeyUpDelayMilliseconds: Int, keyUpGapMilliseconds: Int)
+  case suppress
+  case startSyntheticHold
+  case releaseSyntheticHold
   case forwardSyntheticKeyUp
+}
+
+struct GlobalHotKeyEventLog {
+  let type: CGEventType
+  let keyCode: UInt16
+  let flags: UInt64
+  let activeKeys: Set<DoubaoShortcutKey>
+  let isActiveShortcut: Bool
+  let isShortcutDown: Bool
+  let eventSourceUserData: Int64
+  let eventSourceUnixProcessID: Int64
+  let eventSourceStateID: Int64
+  let note: String?
+
+  var message: String {
+    let sortedKeys = activeKeys
+      .map(\.rawValue)
+      .sorted()
+      .joined(separator: "+")
+    return [
+      "observed shortcut event type=\(type.rawValue)",
+      "keyCode=\(keyCode)",
+      "flags=0x\(String(flags, radix: 16))",
+      "activeKeys=\(sortedKeys.isEmpty ? "none" : sortedKeys)",
+      "isActiveShortcut=\(isActiveShortcut)",
+      "isShortcutDown=\(isShortcutDown)",
+      "eventSourceUserData=\(eventSourceUserData)",
+      "eventSourceUnixProcessID=\(eventSourceUnixProcessID)",
+      "eventSourceStateID=\(eventSourceStateID)",
+      "note=\(note ?? "none")"
+    ].joined(separator: ", ")
+  }
+}
+
+private extension CGEvent {
+  func logEvent(
+    type: CGEventType,
+    activeKeys: Set<DoubaoShortcutKey>,
+    isActiveShortcut: Bool,
+    isShortcutDown: Bool,
+    note: String?
+  ) -> GlobalHotKeyEventLog {
+    GlobalHotKeyEventLog(
+      type: type,
+      keyCode: keyCode,
+      flags: UInt64(flags.rawValue),
+      activeKeys: activeKeys,
+      isActiveShortcut: isActiveShortcut,
+      isShortcutDown: isShortcutDown,
+      eventSourceUserData: getIntegerValueField(.eventSourceUserData),
+      eventSourceUnixProcessID: getIntegerValueField(.eventSourceUnixProcessID),
+      eventSourceStateID: getIntegerValueField(.eventSourceStateID),
+      note: note
+    )
+  }
 }
