@@ -1,9 +1,5 @@
 .build/
 dist/
-.codex_inspect_doubaoime/
 .DS_Store
-.vscode/
-*.app
-*.zip
-*.dSYM
-DerivedData/
+CONTEXT.md
+docs/

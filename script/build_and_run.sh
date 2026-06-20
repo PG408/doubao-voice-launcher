@@ -1,102 +1,136 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PRODUCT_NAME="DoubaoVoiceLauncher"
-BUNDLE_DISPLAY_NAME="豆包语音输入切换"
-BUNDLE_ID="com.local.doubao.voice-launcher"
+MODE="${1:-run}"
+APP_NAME="DoubaoVoiceSwitch"
+LEGACY_APP_NAME="DoubaoVoiceLauncher"
+DISPLAY_APP_NAME="Doubao Voice Switch"
+BUNDLE_ID="com.bytedance.DoubaoVoiceSwitch"
+MIN_SYSTEM_VERSION="14.0"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
-APP_BUNDLE="$DIST_DIR/$BUNDLE_DISPLAY_NAME.app"
-EXECUTABLE_PATH="$APP_BUNDLE/Contents/MacOS/$PRODUCT_NAME"
-BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-debug}"
-ZIP_PATH="$DIST_DIR/$PRODUCT_NAME.zip"
-FILE_LOG_PATH="$HOME/Library/Logs/DoubaoVoiceLauncher/DoubaoVoiceLauncher.log"
+APP_BUNDLE="$DIST_DIR/$DISPLAY_APP_NAME.app"
+LEGACY_APP_BUNDLE="$DIST_DIR/$LEGACY_APP_NAME.app"
+LEGACY_PRODUCT_APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
+APP_CONTENTS="$APP_BUNDLE/Contents"
+APP_MACOS="$APP_CONTENTS/MacOS"
+APP_RESOURCES="$APP_CONTENTS/Resources"
+APP_BINARY="$APP_MACOS/$APP_NAME"
+INFO_PLIST="$APP_CONTENTS/Info.plist"
+APP_ICON_SOURCE="$ROOT_DIR/Sources/DoubaoVoiceSwitch/Resources/AppIcon.icns"
 
 cd "$ROOT_DIR"
 
-pkill -x "$PRODUCT_NAME" >/dev/null 2>&1 || true
-swift build -c "$BUILD_CONFIGURATION" --product "$PRODUCT_NAME"
+open_app() {
+  /usr/bin/open -n "$APP_BUNDLE"
+}
 
-rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-cp ".build/$BUILD_CONFIGURATION/$PRODUCT_NAME" "$EXECUTABLE_PATH"
-cp "$ROOT_DIR"/Sources/DoubaoVoiceLauncher/Resources/* "$APP_BUNDLE/Contents/Resources/"
-/usr/bin/swift "$ROOT_DIR/script/generate_app_icon.swift" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+stop_running_apps() {
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+  pkill -x "$LEGACY_APP_NAME" >/dev/null 2>&1 || true
+}
 
-cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
+verify_existing_app() {
+  if [[ ! -x "$APP_BINARY" ]]; then
+    echo "existing app bundle not found at $APP_BUNDLE; run $0 first" >&2
+    exit 1
+  fi
+
+  stop_running_apps
+  /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
+  open_app
+  sleep 1
+  pgrep -x "$APP_NAME" >/dev/null
+}
+
+case "$MODE" in
+  --launch-existing|launch-existing)
+    if [[ ! -x "$APP_BINARY" ]]; then
+      echo "existing app bundle not found at $APP_BUNDLE; run $0 first" >&2
+      exit 1
+    fi
+    stop_running_apps
+    open_app
+    exit 0
+    ;;
+  --verify-existing|verify-existing)
+    verify_existing_app
+    exit 0
+    ;;
+esac
+
+stop_running_apps
+
+swift build
+BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
+
+rm -rf "$APP_BUNDLE" "$LEGACY_APP_BUNDLE" "$LEGACY_PRODUCT_APP_BUNDLE"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES"
+cp "$BUILD_BINARY" "$APP_BINARY"
+chmod +x "$APP_BINARY"
+if [[ -f "$APP_ICON_SOURCE" ]]; then
+  cp "$APP_ICON_SOURCE" "$APP_RESOURCES/AppIcon.icns"
+fi
+
+cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>$PRODUCT_NAME</string>
+  <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
-  <string>$BUNDLE_DISPLAY_NAME</string>
+  <string>$DISPLAY_APP_NAME</string>
   <key>CFBundleDisplayName</key>
-  <string>$BUNDLE_DISPLAY_NAME</string>
+  <string>$DISPLAY_APP_NAME</string>
   <key>CFBundleIconFile</key>
-  <string>AppIcon.icns</string>
+  <string>AppIcon</string>
   <key>CFBundleIconName</key>
   <string>AppIcon</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>0.1.6</string>
-  <key>CFBundleVersion</key>
-  <string>7</string>
   <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>LSUIElement</key>
+  <true/>
 </dict>
 </plist>
 PLIST
 
-/usr/bin/codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP_BUNDLE" >/dev/null
-/usr/bin/touch "$APP_BUNDLE"
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" >/dev/null 2>&1 || true
+/usr/bin/codesign --force --sign - --identifier "$BUNDLE_ID" "$APP_BUNDLE" >/dev/null
+/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 
-stream_logs() {
-  local predicate="$1"
-  /usr/bin/open -n "$APP_BUNDLE"
-  sleep 1
-  echo "Streaming logs with predicate: $predicate"
-  /usr/bin/log stream --style compact --info --debug --predicate "$predicate"
-}
-
-case "${1:-}" in
-  --package)
-    rm -f "$ZIP_PATH"
-    /usr/bin/ditto -c -k --norsrc --keepParent "$APP_BUNDLE" "$ZIP_PATH"
-    echo "Built $APP_BUNDLE"
-    echo "Packaged $ZIP_PATH"
+case "$MODE" in
+  run)
+    open_app
     ;;
-  --verify)
-    /usr/bin/open -n "$APP_BUNDLE"
+  --debug|debug)
+    lldb -- "$APP_BINARY"
+    ;;
+  --logs|logs)
+    open_app
+    /usr/bin/log stream --info --style compact --predicate "process == \"$APP_NAME\""
+    ;;
+  --telemetry|telemetry)
+    open_app
+    /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
+    ;;
+  --verify|verify)
+    open_app
     sleep 1
-    pgrep -x "$PRODUCT_NAME" >/dev/null
-    echo "$BUNDLE_DISPLAY_NAME is running"
-    ;;
-  --logs)
-    stream_logs "process == \"$PRODUCT_NAME\""
-    ;;
-  --telemetry)
-    stream_logs "subsystem == \"$BUNDLE_ID\""
-    ;;
-  --tail-file-log)
-    /usr/bin/open -n "$APP_BUNDLE"
-    sleep 1
-    mkdir -p "$(dirname "$FILE_LOG_PATH")"
-    touch "$FILE_LOG_PATH"
-    echo "Tailing file log: $FILE_LOG_PATH"
-    tail -f "$FILE_LOG_PATH"
-    ;;
-  --no-run)
-    echo "Built $APP_BUNDLE"
+    pgrep -x "$APP_NAME" >/dev/null
     ;;
   *)
-    /usr/bin/open -n "$APP_BUNDLE"
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--launch-existing|--verify-existing]" >&2
+    exit 2
     ;;
 esac

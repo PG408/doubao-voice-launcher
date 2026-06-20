@@ -1,121 +1,50 @@
-# Doubao Voice Input Switcher
+# Doubao Voice Switch
 
-Doubao Voice Input Switcher is a macOS helper tool that temporarily switches to the Doubao input method during voice input and restores the original input method after voice input ends. This project is an unofficial tool and is not released by Doubao or ByteDance.
+豆包语音切换器是一个 macOS 菜单栏小工具。使用其他输入法时，如果想要进行语音输入，它会自动切换到豆包输入法并交给豆包处理；语音输入结束后，再切换回原来的输入法。
 
-This is a pure Codex vibe-coding project: requirements, implementation, packaging scripts, and documentation were all generated and iterated by the user through interactive Codex sessions.
+## 关于
 
-## Features
+这是一个使用 Codex 协作开发的纯 vibe coding 项目。需求、调试、UI 调整和实现都通过自然语言迭代完成。
 
-- Supports both press-and-hold and single-click trigger modes.
-- Temporarily switches to the Doubao input method when voice input starts, then restores the original input method when it ends.
-- Supports selecting shortcuts for each mode inside the app; modes without a selected shortcut will not be triggered.
-- Supports configuring the forwarding delay and the press-and-hold trigger duration.
-- Supports checking the Doubao input method installation status, current input source, and background listener status.
-- Provides quick entries for Accessibility settings and Doubao settings.
-- Provides local debug logs to help troubleshoot shortcuts, input method switching, and voice startup confirmation.
+## 截图
 
-## Requirements
+![菜单栏](.github/images/menu-bar.png)
 
-- macOS 13 or later.
-- Doubao input method installed.
-- Accessibility permission must be granted on first use.
+![设置页](.github/images/settings.png)
 
-Current release packages are usually built locally with SwiftPM, so the architecture depends on the build machine. The default artifact built on an Apple Silicon machine is arm64. To support Intel Macs at the same time, an additional universal binary must be created.
+## 功能
 
-## Installation
+- 菜单栏常驻运行
+- 支持点按或长按豆包语音快捷键
+- 自动切换到豆包输入法
+- 语音结束后切回原输入法
+- 支持开机自启动
+- 本地日志按天滚动，保留 7 天
 
-1. Download `DoubaoVoiceLauncher.zip` from GitHub Releases.
-2. Unzip it, then drag `豆包语音输入切换.app` into the Applications folder.
-3. On first launch, if macOS shows a "cannot verify the developer" warning, right-click the app and choose "Open", or allow it in System Settings - Privacy & Security.
-4. Enable Accessibility permission as prompted by the app. If authorization still does not take effect, quit and reopen the app.
+## 使用
 
-## Usage
+1. 安装并启用豆包输入法。
+2. 打开 Doubao Voice Switch。
+3. 在系统设置中授予辅助功能权限。
+4. 在设置页把快捷键设置为与豆包输入法一致。
+5. 使用快捷键启动豆包语音输入。
 
-Usage steps:
-- Set the voice input shortcut in the Doubao input method.
-- Open the app and grant Accessibility permission.
-- Restart the app, then set the "Press-and-hold mode" or "Single-click mode" shortcut in the app as needed, using the same shortcut as Doubao voice input.
-- Adjust timing settings as needed:
-  - Forwarding delay: the delay before triggering the shortcut after switching to the Doubao input method.
-  - Press-and-hold trigger duration: how long the shortcut must be held before it is recognized as a press-and-hold action.
-- Start using the app:
-  - Press-and-hold mode is for "hold to talk, release to end". The app temporarily switches to the Doubao input method while the shortcut is held, then restores the original input method after release.
-  - Single-click mode is for "click once to start, click again to end". After the first shortcut click, the app temporarily switches to the Doubao input method and keeps the Doubao voice shortcut held on the user's behalf. After the same shortcut is clicked again, the app releases the shortcut and restores the original input method.
+## 开发
 
-The app only listens for shortcut combinations selected by the user and switches input methods through local macOS input source APIs.
+构建：
 
-## Startup Confirmation Mechanism for No-Hold Mode
+```bash
+swift build
+```
 
-Single-click mode is a no-hold mode: the app keeps the Doubao voice shortcut held on the user's behalf until the user triggers the end action again. Because completion of macOS input method switching does not mean Doubao's internal voice pipeline is ready, the app uses the following startup flow in no-hold mode:
+运行并打包本地 app：
 
-1. Switch to the Doubao input method and confirm that the current input source has changed to Doubao.
-2. Immediately send a `keyUp` for the same shortcut to Doubao to clear any possibly residual modifier-key state.
-3. Wait for the forwarding delay configured by the user in the app.
-4. Send the first `keyDown` to start attempting to launch Doubao voice input.
-5. Check whether the Doubao input method is running an audio input stream at the cumulative time points `350ms`, `600ms`, and `750ms`.
-6. Once any checkpoint confirms success, the app enters the voice-input hold state.
-7. If all three checks fail, the app sends `keyUp`, waits `100ms`, then sends a second `keyDown` to retry once.
-8. If the second attempt still cannot be confirmed, the app releases the shortcut and restores the original input method so the user can trigger it again.
+```bash
+./script/build_and_run.sh --verify
+```
 
-This mechanism applies only to single-click no-hold mode. It does not change the press-and-hold mode semantics of "hold to talk, release to end".
+运行核心行为测试：
 
-## Local Build
-
-This project is built with Swift Package Manager:
-
-`./script/build_and_run.sh --no-run`
-
-This command generates:
-
-- `dist/豆包语音输入切换.app`
-
-To generate a compressed package that can be uploaded to a GitHub Release:
-
-`./script/build_and_run.sh --package`
-
-This command generates:
-
-- `dist/豆包语音输入切换.app`
-- `dist/DoubaoVoiceLauncher.zip`
-
-The default build configuration is debug, which preserves the runtime behavior of synthesized shortcut events used by the currently available package. To temporarily use a release build, run:
-
-`BUILD_CONFIGURATION=release ./script/build_and_run.sh --no-run`
-
-## Debug Logs
-
-The app automatically saves key debug information to:
-
-`~/Library/Logs/DoubaoVoiceLauncher/DoubaoVoiceLauncher.log`
-
-At the same time, the app still uses `com.local.doubao.voice-launcher` as the macOS unified logging subsystem and records key runtime events under the categories `App`, `UI`, `Permissions`, `Automation`, `Shortcut`, and `InputSource`.
-
-When troubleshooting no-hold mode startup issues, check the following log fragments first:
-
-- `No-hold activation preflight reset keyUp sent`: indicates that a preflight `keyUp` reset has been sent after input method confirmation.
-- `No-hold activation pending after forwarded keyDown`: indicates that a `keyDown` has been sent for a startup attempt.
-- `No-hold activation probe 1/3`, `2/3`, `3/3`: indicate the startup confirmation checks at `350ms / 600ms / 750ms`.
-- `No-hold activation attempt 1 failed`: indicates that the first three-stage check did not confirm success, so the app will release the shortcut and retry once.
-- `No-hold activation confirmed`: indicates that the Doubao input method has been detected running an audio input stream.
-
-To launch the app and view the automatically saved file log:
-
-`./script/build_and_run.sh --tail-file-log`
-
-To launch the app and view telemetry for this app:
-
-`./script/build_and_run.sh --telemetry`
-
-To view broader runtime logs by process if needed, run:
-
-`./script/build_and_run.sh --logs`
-
-## Signing and Security Notes
-
-The current script uses ad-hoc signing, which is suitable for personal or small-scale trial use. For public distribution, macOS may warn that the developer cannot be verified. For releases intended for a broader user base, signing with an Apple Developer ID certificate and completing Apple notarization are recommended.
-
-The current source code contains no network request logic. The tool's core capabilities are local shortcut listening and input method switching. Users can audit the source code to confirm its behavior.
-
-## Disclaimer
-
-This project is a personal helper tool. Users should independently confirm that it complies with their organization's software installation, security, and privacy policies.
+```bash
+swift run DoubaoVoiceSwitchCoreBehaviorTests
+```

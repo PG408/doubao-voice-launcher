@@ -1,0 +1,22 @@
+import AppKit
+import SwiftUI
+
+@main
+struct DoubaoVoiceSwitchApp: App {
+  @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+  @StateObject private var model = AppModel.shared
+
+  var body: some Scene {
+    MenuBarExtra {
+      MenuBarView(model: model)
+    } label: {
+      Image(nsImage: VoiceLauncherGlyphImage.make(size: 22, color: .white))
+        .accessibilityLabel("豆包语音切换器，\(model.statusTitle)")
+    }
+    .menuBarExtraStyle(.window)
+
+    Settings {
+      SettingsView(model: model)
+    }
+  }
+}
