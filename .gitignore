@@ -3,3 +3,5 @@ dist/
 .DS_Store
 CONTEXT.md
 docs/
+.vscode/
+.codex/
