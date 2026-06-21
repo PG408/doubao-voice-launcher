@@ -8,9 +8,9 @@
 
 ## 截图
 
-![菜单栏](docs/images/menu-bar.png)
+![菜单栏](assets/menu-bar.png)
 
-![设置页](docs/images/settings.png)
+![设置页](assets/settings.png)
 
 ## 功能
 
