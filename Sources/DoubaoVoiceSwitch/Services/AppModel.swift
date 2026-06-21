@@ -15,17 +15,23 @@ final class AppModel: ObservableObject {
   private let logger: DiagnosticLogger
   private let hotKeyService: GlobalHotKeyService
   private let inputSourceService = InputSourceService()
+  private let audioInputProbe = DoubaoAudioInputProbe()
   private let handoffController = InputSourceHandoffController()
   private let forwardingPolicy = ShortcutEventForwardingPolicy()
   private let launchAtLoginService = LaunchAtLoginService()
   private let shortcutSuppressionMilliseconds = 300
+  private let shortClickFirstWatchdogMilliseconds = 500
+  private let shortClickRetryWatchdogMilliseconds = 1000
+  private let shortClickRetryResetMilliseconds = 100
 
   private var readinessTimer: Timer?
   private var registeredShortcut: DoubaoShortcut?
   private var pendingRestoreWorkItem: DispatchWorkItem?
   private var pendingLongPressWorkItem: DispatchWorkItem?
+  private var pendingShortClickActivationWatchdogWorkItem: DispatchWorkItem?
   private var shortcutDownDate: Date?
   private var shortcutSuppressionUntil: Date?
+  private var pendingSuppressedShortcutKeyUps = 0
   private var shortcutStartedFromInputSourceHandoff = false
   private var lastRestorableInputSourceID: String?
   private var lastLoggedStatus: AppStatus?
@@ -191,6 +197,8 @@ final class AppModel: ObservableObject {
   }
 
   func restoreInputSourceIfNeeded(reason: String) {
+    pendingShortClickActivationWatchdogWorkItem?.cancel()
+    pendingShortClickActivationWatchdogWorkItem = nil
     if hotKeyService.releaseSyntheticHoldIfNeeded() {
       record(.shortcut, "released synthetic hold, releaseReason=\(reason)")
     }
@@ -258,9 +266,10 @@ final class AppModel: ObservableObject {
 
     let now = Date()
     if isShortcutSuppressionActive(at: now) {
+      pendingSuppressedShortcutKeyUps += 1
       record(
         .shortcut,
-        "shortcut ignored by suppression window event=keyDown, shortcut=\(shortcut.displayText), handoffState=\(handoffController.stateDescription)"
+        "shortcut ignored by suppression window event=keyDown, shortcut=\(shortcut.displayText), pendingSuppressedKeyUps=\(pendingSuppressedShortcutKeyUps), handoffState=\(handoffController.stateDescription)"
       )
       return .suppress
     }
@@ -269,6 +278,8 @@ final class AppModel: ObservableObject {
     pendingRestoreWorkItem = nil
     pendingLongPressWorkItem?.cancel()
     pendingLongPressWorkItem = nil
+    pendingShortClickActivationWatchdogWorkItem?.cancel()
+    pendingShortClickActivationWatchdogWorkItem = nil
     shortcutDownDate = now
     let stateBefore = handoffController.stateDescription
     let currentInputSource = inputSourceService.currentInputSource()
@@ -313,6 +324,10 @@ final class AppModel: ObservableObject {
     let now = Date()
     let releasePressKind = handoffController.releasePressKind
     let isSuppressionActive = isShortcutSuppressionActive(at: now)
+    let isPairedWithSuppressedKeyDown = pendingSuppressedShortcutKeyUps > 0
+    if isPairedWithSuppressedKeyDown {
+      pendingSuppressedShortcutKeyUps -= 1
+    }
     let pressDurationMilliseconds = shortcutDownDate.map {
       max(0, Int(now.timeIntervalSince($0) * 1000))
     } ?? 0
@@ -320,12 +335,13 @@ final class AppModel: ObservableObject {
       startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff,
       releasePressKind: releasePressKind,
       pressDurationMilliseconds: pressDurationMilliseconds,
-      isSuppressionWindowActive: isSuppressionActive
+      isSuppressionWindowActive: isSuppressionActive,
+      isPairedWithSuppressedKeyDown: isPairedWithSuppressedKeyDown
     )
     if keyUpForwarding == .suppress {
       record(
         .shortcut,
-        "shortcut ignored by suppression window event=keyUp, durationMs=\(pressDurationMilliseconds), releasePressKind=\(releasePressKind?.rawValue ?? "none"), handoffState=\(handoffController.stateDescription)"
+        "shortcut ignored by suppression window event=keyUp, durationMs=\(pressDurationMilliseconds), releasePressKind=\(releasePressKind?.rawValue ?? "none"), pairedWithSuppressedKeyDown=\(isPairedWithSuppressedKeyDown), pendingSuppressedKeyUps=\(pendingSuppressedShortcutKeyUps), handoffState=\(handoffController.stateDescription)"
       )
       return .suppress
     }
@@ -350,6 +366,10 @@ final class AppModel: ObservableObject {
       return .suppress
     case .startSyntheticHold:
       startShortcutSuppressionWindow(reason: "startSyntheticHold", now: now)
+      scheduleShortClickActivationWatchdog(
+        attempt: 1,
+        delayMilliseconds: shortClickFirstWatchdogMilliseconds
+      )
       return .startSyntheticHold
     case .releaseSyntheticHold:
       return .releaseSyntheticHold
@@ -388,6 +408,110 @@ final class AppModel: ObservableObject {
     DispatchQueue.main.asyncAfter(
       deadline: .now() + .milliseconds(thresholdMilliseconds),
       execute: workItem
+    )
+  }
+
+  private func scheduleShortClickActivationWatchdog(attempt: Int, delayMilliseconds: Int) {
+    pendingShortClickActivationWatchdogWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        self?.runShortClickActivationWatchdog(attempt: attempt)
+      }
+    }
+    pendingShortClickActivationWatchdogWorkItem = workItem
+    record(
+      .voiceReadiness,
+      "scheduled short click activation watchdog attempt=\(attempt), delayMs=\(delayMilliseconds), handoffState=\(handoffController.stateDescription)"
+    )
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + .milliseconds(delayMilliseconds),
+      execute: workItem
+    )
+  }
+
+  private func runShortClickActivationWatchdog(attempt: Int) {
+    pendingShortClickActivationWatchdogWorkItem = nil
+
+    guard status == .running else {
+      record(.voiceReadiness, "short click activation watchdog skipped because status=\(status.title)")
+      return
+    }
+
+    let stateBefore = handoffController.stateDescription
+    guard inputSourceService.currentInputSource() == .doubao else {
+      record(
+        .voiceReadiness,
+        "short click activation watchdog cancelled because currentInputSource=\(inputSourceService.currentInputSource()), attempt=\(attempt), handoffState=\(stateBefore)"
+      )
+      restoreInputSourceIfNeeded(reason: "shortClickActivationInputSourceChanged")
+      return
+    }
+
+    if audioInputProbe.isRunningInput() {
+      record(
+        .voiceReadiness,
+        "short click activation confirmed attempt=\(attempt), handoffState=\(stateBefore)"
+      )
+      return
+    }
+
+    if attempt == 1,
+       let retryAction = handoffController.retryShortClickActivationIfNeeded() {
+      let didRelease = hotKeyService.releaseSyntheticHoldIfNeeded()
+      record(
+        .voiceReadiness,
+        "short click activation missed; retrying with captured synthetic hold template, attempt=\(attempt), retryAction=\(retryAction), releasedPreviousHold=\(didRelease), handoffStateBefore=\(stateBefore), handoffStateAfter=\(handoffController.stateDescription)"
+      )
+      scheduleShortClickActivationRetryKeyDown(action: retryAction)
+      return
+    }
+
+    let didRelease = hotKeyService.releaseSyntheticHoldIfNeeded()
+    record(
+      .voiceReadiness,
+      "short click activation failed; restoring input source, attempt=\(attempt), releasedSyntheticHold=\(didRelease), handoffState=\(handoffController.stateDescription)"
+    )
+    applyHandoffActions(handoffController.cancelHandoff(), reason: "short click activation watchdog")
+  }
+
+  private func scheduleShortClickActivationRetryKeyDown(action: InputSourceShortcutRetryAction) {
+    pendingShortClickActivationWatchdogWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        self?.sendShortClickActivationRetryKeyDown(action: action)
+      }
+    }
+    pendingShortClickActivationWatchdogWorkItem = workItem
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + .milliseconds(shortClickRetryResetMilliseconds),
+      execute: workItem
+    )
+  }
+
+  private func sendShortClickActivationRetryKeyDown(action: InputSourceShortcutRetryAction) {
+    pendingShortClickActivationWatchdogWorkItem = nil
+    guard status == .running, inputSourceService.currentInputSource() == .doubao else {
+      record(
+        .voiceReadiness,
+        "short click activation retry stopped before keyDown, currentInputSource=\(inputSourceService.currentInputSource()), handoffState=\(handoffController.stateDescription)"
+      )
+      restoreInputSourceIfNeeded(reason: "shortClickActivationRetryStopped")
+      return
+    }
+
+    let didStart: Bool
+    switch action {
+    case .restartSyntheticHoldFromCapturedTemplate:
+      didStart = hotKeyService.restartSyntheticHoldFromCapturedTemplate()
+    }
+    startShortcutSuppressionWindow(reason: "shortClickRetrySyntheticKeyDown", now: Date())
+    record(
+      .voiceReadiness,
+      "short click activation retry keyDown sent, retryAction=\(action), didStart=\(didStart), handoffState=\(handoffController.stateDescription)"
+    )
+    scheduleShortClickActivationWatchdog(
+      attempt: 2,
+      delayMilliseconds: shortClickRetryWatchdogMilliseconds
     )
   }
 

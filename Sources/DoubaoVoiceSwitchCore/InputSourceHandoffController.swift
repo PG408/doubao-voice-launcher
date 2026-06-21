@@ -15,6 +15,10 @@ public enum InputSourcePressKind: String, Equatable, Sendable {
   case syntheticHoldRelease
 }
 
+public enum InputSourceShortcutRetryAction: Equatable, Sendable {
+  case restartSyntheticHoldFromCapturedTemplate
+}
+
 public final class InputSourceHandoffController {
   public private(set) var longPressThresholdMilliseconds: Int
   private let longPressRestoreDelayMilliseconds: Int
@@ -40,7 +44,7 @@ public final class InputSourceHandoffController {
       return .short
     case .shortClickSyntheticHoldStopKeyDown:
       return .syntheticHoldRelease
-    case .idle, .shortClickSyntheticHoldActive:
+    case .idle, .shortClickSyntheticHoldActive, .shortClickSyntheticHoldRetryActive:
       return nil
     }
   }
@@ -69,7 +73,8 @@ public final class InputSourceHandoffController {
 
       state = .handoffKeyDown(originalInputSourceID: restorationID)
       return currentInputSource.restorationID == nil ? [] : [.selectDoubaoInputSource]
-    case let .shortClickSyntheticHoldActive(originalInputSourceID):
+    case let .shortClickSyntheticHoldActive(originalInputSourceID),
+         let .shortClickSyntheticHoldRetryActive(originalInputSourceID):
       state = .shortClickSyntheticHoldStopKeyDown(originalInputSourceID: originalInputSourceID)
       return []
     case .handoffKeyDown, .longPressActive, .shortClickSyntheticHoldStopKeyDown:
@@ -109,9 +114,18 @@ public final class InputSourceHandoffController {
           reason: .secondShortClickRelease
         )
       ]
-    case .idle, .shortClickSyntheticHoldActive:
+    case .idle, .shortClickSyntheticHoldActive, .shortClickSyntheticHoldRetryActive:
       return []
     }
+  }
+
+  public func retryShortClickActivationIfNeeded() -> InputSourceShortcutRetryAction? {
+    guard case let .shortClickSyntheticHoldActive(originalInputSourceID) = state else {
+      return nil
+    }
+
+    state = .shortClickSyntheticHoldRetryActive(originalInputSourceID: originalInputSourceID)
+    return .restartSyntheticHoldFromCapturedTemplate
   }
 
   public func cancelHandoff() -> [InputSourceHandoffAction] {
@@ -135,6 +149,7 @@ private enum State {
   case handoffKeyDown(originalInputSourceID: String)
   case longPressActive(originalInputSourceID: String)
   case shortClickSyntheticHoldActive(originalInputSourceID: String)
+  case shortClickSyntheticHoldRetryActive(originalInputSourceID: String)
   case shortClickSyntheticHoldStopKeyDown(originalInputSourceID: String)
 
   var originalInputSourceID: String? {
@@ -144,6 +159,7 @@ private enum State {
     case let .handoffKeyDown(originalInputSourceID),
          let .longPressActive(originalInputSourceID),
          let .shortClickSyntheticHoldActive(originalInputSourceID),
+         let .shortClickSyntheticHoldRetryActive(originalInputSourceID),
          let .shortClickSyntheticHoldStopKeyDown(originalInputSourceID):
       return originalInputSourceID
     }
@@ -159,6 +175,8 @@ private enum State {
       return "longPressActive"
     case .shortClickSyntheticHoldActive:
       return "shortClickSyntheticHoldActive"
+    case .shortClickSyntheticHoldRetryActive:
+      return "shortClickSyntheticHoldRetryActive"
     case .shortClickSyntheticHoldStopKeyDown:
       return "shortClickSyntheticHoldStopKeyDown"
     }

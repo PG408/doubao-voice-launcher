@@ -14,7 +14,9 @@ final class GlobalHotKeyService {
   private var isShortcutDown = false
   private var activeKeys: Set<DoubaoShortcutKey> = []
   private var capturedKeyDownEvent: CGEvent?
-  private var syntheticHoldKeyUpEvent: CGEvent?
+  private var syntheticHoldKeyUpEvents: [CGEvent] = []
+  private var syntheticHoldKeyDownTemplate: CGEvent?
+  private var syntheticHoldKeyUpTemplates: [CGEvent] = []
 
   deinit {
     unregister()
@@ -71,7 +73,9 @@ final class GlobalHotKeyService {
     isShortcutDown = false
     activeKeys = []
     capturedKeyDownEvent = nil
-    syntheticHoldKeyUpEvent = nil
+    syntheticHoldKeyUpEvents = []
+    syntheticHoldKeyDownTemplate = nil
+    syntheticHoldKeyUpTemplates = []
   }
 
   @discardableResult
@@ -87,12 +91,33 @@ final class GlobalHotKeyService {
 
   @discardableResult
   func releaseSyntheticHoldIfNeeded() -> Bool {
-    guard let syntheticHoldKeyUpEvent else {
+    guard !syntheticHoldKeyUpEvents.isEmpty else {
       return false
     }
 
-    self.syntheticHoldKeyUpEvent = nil
-    syntheticHoldKeyUpEvent.post(tap: .cghidEventTap)
+    let keyUpEvents = syntheticHoldKeyUpEvents
+    syntheticHoldKeyUpEvents = []
+    for event in keyUpEvents {
+      event.post(tap: .cghidEventTap)
+    }
+    return true
+  }
+
+  @discardableResult
+  func restartSyntheticHoldFromCapturedTemplate() -> Bool {
+    releaseSyntheticHoldIfNeeded()
+    guard let keyDownEvent = syntheticHoldKeyDownTemplate?.copy(),
+          !syntheticHoldKeyUpTemplates.isEmpty else {
+      return false
+    }
+
+    let keyUpEvents = syntheticHoldKeyUpTemplates.compactMap { $0.copy() }
+    guard !keyUpEvents.isEmpty else {
+      return false
+    }
+
+    syntheticHoldKeyUpEvents = keyUpEvents
+    keyDownEvent.post(tap: .cghidEventTap)
     return true
   }
 
@@ -207,7 +232,9 @@ final class GlobalHotKeyService {
 
     capturedKeyDownEvent = nil
     replayKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
-    syntheticHoldKeyUpEvent = replayKeyUpEvent
+    syntheticHoldKeyUpEvents = [replayKeyUpEvent]
+    syntheticHoldKeyDownTemplate = replayKeyDownEvent.copy()
+    syntheticHoldKeyUpTemplates = [replayKeyUpEvent].compactMap { $0.copy() }
     replayKeyDownEvent.post(tap: .cghidEventTap)
   }
 

@@ -302,7 +302,8 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
       startedFromInputSourceHandoff: true,
       releasePressKind: .short,
       pressDurationMilliseconds: 75,
-      isSuppressionWindowActive: false
+      isSuppressionWindowActive: false,
+      isPairedWithSuppressedKeyDown: false
     ),
     .startSyntheticHold,
     "从非豆包切换后的第一次短按应启动合成持有，不应立即补发 keyUp"
@@ -312,7 +313,8 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
       startedFromInputSourceHandoff: false,
       releasePressKind: .syntheticHoldRelease,
       pressDurationMilliseconds: 75,
-      isSuppressionWindowActive: false
+      isSuppressionWindowActive: false,
+      isPairedWithSuppressedKeyDown: false
     ),
     .releaseSyntheticHold,
     "第二次短按释放应补发 synthetic keyUp 结束合成持有"
@@ -322,17 +324,30 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
       startedFromInputSourceHandoff: false,
       releasePressKind: nil,
       pressDurationMilliseconds: 75,
-      isSuppressionWindowActive: true
+      isSuppressionWindowActive: true,
+      isPairedWithSuppressedKeyDown: false
     ),
     .suppress,
     "兜底窗口内的新快捷键 keyUp 应被完全忽略"
   )
   try expectEqual(
     policy.keyUpForwarding(
+      startedFromInputSourceHandoff: false,
+      releasePressKind: nil,
+      pressDurationMilliseconds: 75,
+      isSuppressionWindowActive: false,
+      isPairedWithSuppressedKeyDown: true
+    ),
+    .suppress,
+    "如果 keyDown 已被兜底窗口屏蔽，对应 keyUp 即使晚到也必须屏蔽"
+  )
+  try expectEqual(
+    policy.keyUpForwarding(
       startedFromInputSourceHandoff: true,
       releasePressKind: .long,
       pressDurationMilliseconds: 75,
-      isSuppressionWindowActive: true
+      isSuppressionWindowActive: true,
+      isPairedWithSuppressedKeyDown: false
     ),
     .forwardSyntheticKeyUp,
     "长按本次真实释放不能被兜底窗口拦截，否则会造成合成按键卡住"
@@ -342,7 +357,8 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
       startedFromInputSourceHandoff: false,
       releasePressKind: .short,
       pressDurationMilliseconds: 75,
-      isSuppressionWindowActive: false
+      isSuppressionWindowActive: false,
+      isPairedWithSuppressedKeyDown: false
     ),
     .passThrough,
     "非输入法接力产生的短按释放应直接放行"
@@ -375,6 +391,45 @@ func testInputSourceHandoffDoesNotDuplicateSelectionWhileActive() throws {
   )
 }
 
+func testInputSourceHandoffRetriesShortClickActivationOnceBeforeCancelling() throws {
+  let controller = InputSourceHandoffController(longPressRestoreDelayMilliseconds: 180)
+
+  _ = controller.shortcutBecameActive(currentInputSource: .other("com.apple.inputmethod.SCIM.ITABC"))
+  _ = controller.shortcutBecameInactive()
+
+  try expectEqual(
+    controller.stateDescription,
+    "shortClickSyntheticHoldActive",
+    "第一次短按后应等待豆包语音启动确认"
+  )
+  try expectEqual(
+    controller.retryShortClickActivationIfNeeded(),
+    .restartSyntheticHoldFromCapturedTemplate,
+    "第一次 watchdog 到期且语音未启动时应使用捕获的真实事件模板重试"
+  )
+  try expectEqual(
+    controller.stateDescription,
+    "shortClickSyntheticHoldRetryActive",
+    "进入重试后应记录 retry 状态，避免无限重试"
+  )
+  try expectEqual(
+    controller.retryShortClickActivationIfNeeded(),
+    nil,
+    "同一次短按只允许一次自动重试"
+  )
+  try expectEqual(
+    controller.cancelHandoff(),
+    [
+      .scheduleRestoreInputSource(
+        "com.apple.inputmethod.SCIM.ITABC",
+        delayMilliseconds: 180,
+        reason: .cancelHandoff
+      )
+    ],
+    "第二次 watchdog 到期仍未启动时应取消接力并恢复原输入法"
+  )
+}
+
 let tests: [(String, () throws -> Void)] = [
   ("testStartsPreparing", testStartsPreparing),
   ("testBecomesRunningWhenRequiredPrerequisitesAreReady", testBecomesRunningWhenRequiredPrerequisitesAreReady),
@@ -395,7 +450,8 @@ let tests: [(String, () throws -> Void)] = [
   ("testInputSourceHandoffUpdatesLongPressThreshold", testInputSourceHandoffUpdatesLongPressThreshold),
   ("testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions", testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions),
   ("testInputSourceHandoffBypassesWhenAlreadyUsingDoubaoInputSource", testInputSourceHandoffBypassesWhenAlreadyUsingDoubaoInputSource),
-  ("testInputSourceHandoffDoesNotDuplicateSelectionWhileActive", testInputSourceHandoffDoesNotDuplicateSelectionWhileActive)
+  ("testInputSourceHandoffDoesNotDuplicateSelectionWhileActive", testInputSourceHandoffDoesNotDuplicateSelectionWhileActive),
+  ("testInputSourceHandoffRetriesShortClickActivationOnceBeforeCancelling", testInputSourceHandoffRetriesShortClickActivationOnceBeforeCancelling)
 ]
 
 do {

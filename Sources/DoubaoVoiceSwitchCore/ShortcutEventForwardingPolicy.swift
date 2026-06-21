@@ -39,8 +39,13 @@ public struct ShortcutEventForwardingPolicy: Equatable, Sendable {
     startedFromInputSourceHandoff: Bool,
     releasePressKind: InputSourcePressKind?,
     pressDurationMilliseconds: Int,
-    isSuppressionWindowActive: Bool
+    isSuppressionWindowActive: Bool,
+    isPairedWithSuppressedKeyDown: Bool
   ) -> ShortcutKeyUpForwarding {
+    if isPairedWithSuppressedKeyDown {
+      return .suppress
+    }
+
     if isSuppressionWindowActive, releasePressKind != .long {
       return .suppress
     }

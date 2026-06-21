@@ -19,7 +19,10 @@ let package = Package(
     .executableTarget(
       name: "DoubaoVoiceSwitch",
       dependencies: ["DoubaoVoiceSwitchCore"],
-      resources: [.copy("Resources")]
+      resources: [.copy("Resources")],
+      linkerSettings: [
+        .linkedFramework("CoreAudio")
+      ]
     ),
     .target(name: "DoubaoVoiceSwitchCore"),
     .executableTarget(
