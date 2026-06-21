@@ -33,11 +33,16 @@ struct MenuBarView: View {
       if !missingPrerequisites.isEmpty {
         VStack(spacing: 8) {
           ForEach(missingPrerequisites) { item in
-            MenuReadinessRow(item: item) {
-              if item.id == "accessibility" {
-                Button("授权") { model.openAccessibilitySettings() }
-                  .controlSize(.small)
+            if item.id == "accessibility" {
+              MenuActionButton(
+                systemImage: "exclamationmark.circle.fill",
+                title: "授权辅助功能权限",
+                iconStyle: .orange
+              ) {
+                model.openAccessibilitySettings()
               }
+            } else {
+              MenuReadinessRow(item: item)
             }
           }
         }
@@ -67,7 +72,7 @@ struct MenuBarView: View {
       }
     }
     .padding(10)
-    .frame(width: 220, alignment: .leading)
+    .frame(width: 200, alignment: .leading)
     .fixedSize(horizontal: false, vertical: true)
     .id(menuLayoutID)
   }
@@ -108,9 +113,8 @@ private struct StatusDot: View {
   }
 }
 
-private struct MenuReadinessRow<Action: View>: View {
+private struct MenuReadinessRow: View {
   let item: PrerequisiteItem
-  @ViewBuilder let action: Action
 
   var body: some View {
     HStack(alignment: .center, spacing: 9) {
@@ -127,9 +131,7 @@ private struct MenuReadinessRow<Action: View>: View {
           .lineLimit(2)
       }
 
-      Spacer(minLength: 10)
-
-      action
+      Spacer()
     }
   }
 }
@@ -137,13 +139,14 @@ private struct MenuReadinessRow<Action: View>: View {
 private struct MenuActionButton: View {
   let systemImage: String
   let title: String
+  var iconStyle: Color = .secondary
   let action: () -> Void
 
   var body: some View {
     Button(action: action) {
       HStack(spacing: 9) {
         Image(systemName: systemImage)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(iconStyle)
           .frame(width: 18)
         Text(title)
         Spacer()
