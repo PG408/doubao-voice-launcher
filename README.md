@@ -8,8 +8,6 @@
 
 ## 截图
 
-![菜单栏](assets/menu-bar.png)
-
 ![设置页](assets/settings.png)
 
 ## 功能
