@@ -6,6 +6,8 @@ final class GlobalHotKeyService {
   var onKeyDown: ((DoubaoShortcut) -> GlobalHotKeyEventDisposition)?
   var onKeyUp: (() -> GlobalHotKeyEventDisposition)?
   var onShortcutEventObserved: ((GlobalHotKeyEventLog) -> Void)?
+  var onSyntheticHoldKeyDownReplay: ((GlobalHotKeySyntheticReplayLog) -> Void)?
+  var syntheticHoldKeyDownDelayMilliseconds = 0
 
   fileprivate static let delayedReplayUserData: Int64 = 0x4442_564c_4b55_5001
   private var eventTap: CFMachPort?
@@ -13,10 +15,12 @@ final class GlobalHotKeyService {
   private var shortcut: DoubaoShortcut?
   private var isShortcutDown = false
   private var activeKeys: Set<DoubaoShortcutKey> = []
-  private var capturedKeyDownEvent: CGEvent?
-  private var syntheticHoldKeyUpEvents: [CGEvent] = []
   private var syntheticHoldKeyDownTemplate: CGEvent?
-  private var syntheticHoldKeyUpTemplates: [CGEvent] = []
+  private var syntheticHoldKeyUpTemplate: CGEvent?
+  private var syntheticHoldKeyUpEvents: [CGEvent] = []
+  private var pendingSyntheticHoldKeyDownWorkItem: DispatchWorkItem?
+  private var pendingSyntheticHoldKeyDownEvent: CGEvent?
+  private var syntheticHoldKeyDownWasSent = false
 
   deinit {
     unregister()
@@ -59,6 +63,7 @@ final class GlobalHotKeyService {
 
   func unregister() {
     releaseSyntheticHoldIfNeeded()
+    cancelPendingSyntheticHoldKeyDownReplay()
     if let runLoopSource {
       CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
       self.runLoopSource = nil
@@ -72,53 +77,114 @@ final class GlobalHotKeyService {
     shortcut = nil
     isShortcutDown = false
     activeKeys = []
-    capturedKeyDownEvent = nil
-    syntheticHoldKeyUpEvents = []
     syntheticHoldKeyDownTemplate = nil
-    syntheticHoldKeyUpTemplates = []
-  }
-
-  @discardableResult
-  func forwardCapturedKeyDown() -> Bool {
-    guard let capturedKeyDownEvent else {
-      return false
-    }
-
-    self.capturedKeyDownEvent = nil
-    capturedKeyDownEvent.post(tap: .cghidEventTap)
-    return true
+    syntheticHoldKeyUpTemplate = nil
+    syntheticHoldKeyUpEvents = []
+    syntheticHoldKeyDownWasSent = false
   }
 
   @discardableResult
   func releaseSyntheticHoldIfNeeded() -> Bool {
-    guard !syntheticHoldKeyUpEvents.isEmpty else {
-      return false
+    releaseSyntheticHold(keepingKeyDownTemplate: false).sentSyntheticKeyUp
+  }
+
+  @discardableResult
+  func resetSyntheticHoldForRetry() -> GlobalHotKeySyntheticResetResult {
+    let result = releaseSyntheticHold(keepingKeyDownTemplate: true)
+    isShortcutDown = false
+    activeKeys = []
+    return result
+  }
+
+  private func releaseSyntheticHold(
+    keepingKeyDownTemplate: Bool
+  ) -> GlobalHotKeySyntheticResetResult {
+    let hadKeyDownTemplate = syntheticHoldKeyDownTemplate != nil
+    let hadPendingReplay = pendingSyntheticHoldKeyDownWorkItem != nil
+      || pendingSyntheticHoldKeyDownEvent != nil
+    let keyDownWasSent = syntheticHoldKeyDownWasSent
+    let keyDownTemplate = keepingKeyDownTemplate ? syntheticHoldKeyDownTemplate?.copy() : nil
+
+    cancelPendingSyntheticHoldKeyDownReplay()
+
+    guard !syntheticHoldKeyUpEvents.isEmpty, keyDownWasSent else {
+      syntheticHoldKeyUpEvents = []
+      syntheticHoldKeyUpTemplate = nil
+      syntheticHoldKeyDownTemplate = keyDownTemplate
+      syntheticHoldKeyDownWasSent = false
+      return GlobalHotKeySyntheticResetResult(
+        hadKeyDownTemplate: hadKeyDownTemplate,
+        hadPendingReplay: hadPendingReplay,
+        keyDownWasSent: keyDownWasSent,
+        sentSyntheticKeyUp: false,
+        clearedTracking: true
+      )
     }
 
     let keyUpEvents = syntheticHoldKeyUpEvents
     syntheticHoldKeyUpEvents = []
+    syntheticHoldKeyUpTemplate = nil
+    syntheticHoldKeyDownTemplate = keyDownTemplate
+    syntheticHoldKeyDownWasSent = false
     for event in keyUpEvents {
       event.post(tap: .cghidEventTap)
     }
+    return GlobalHotKeySyntheticResetResult(
+      hadKeyDownTemplate: hadKeyDownTemplate,
+      hadPendingReplay: hadPendingReplay,
+      keyDownWasSent: keyDownWasSent,
+      sentSyntheticKeyUp: true,
+      clearedTracking: true
+    )
+  }
+
+  private func cancelPendingSyntheticHoldKeyDownReplay() {
+    pendingSyntheticHoldKeyDownWorkItem?.cancel()
+    pendingSyntheticHoldKeyDownWorkItem = nil
+    pendingSyntheticHoldKeyDownEvent = nil
+  }
+
+  @discardableResult
+  private func postSyntheticHoldKeyDown(
+    _ event: CGEvent,
+    reason: GlobalHotKeySyntheticReplayReason,
+    delayMilliseconds: Int
+  ) -> Bool {
+    guard let replayKeyDownEvent = event.copy() else {
+      return false
+    }
+
+    replayKeyDownEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
+    syntheticHoldKeyDownWasSent = true
+    replayKeyDownEvent.post(tap: .cghidEventTap)
+    onSyntheticHoldKeyDownReplay?(replayKeyDownEvent.syntheticReplayLog(
+      reason: reason,
+      delayMilliseconds: delayMilliseconds,
+      sent: true
+    ))
     return true
   }
 
   @discardableResult
-  func restartSyntheticHoldFromCapturedTemplate() -> Bool {
-    releaseSyntheticHoldIfNeeded()
-    guard let keyDownEvent = syntheticHoldKeyDownTemplate?.copy(),
-          !syntheticHoldKeyUpTemplates.isEmpty else {
+  func retrySyntheticHoldKeyDown() -> Bool {
+    guard let keyDownEvent = syntheticHoldKeyDownTemplate?.copy() else {
       return false
     }
 
-    let keyUpEvents = syntheticHoldKeyUpTemplates.compactMap { $0.copy() }
-    guard !keyUpEvents.isEmpty else {
-      return false
+    keyDownEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
+    if let keyUpEvent = syntheticHoldKeyUpTemplate?.copy() {
+      syntheticHoldKeyUpEvents = [keyUpEvent]
+    } else {
+      syntheticHoldKeyUpTemplate = makeSyntheticReleaseEvent(from: keyDownEvent)
+      if let keyUpEvent = syntheticHoldKeyUpTemplate?.copy() {
+        syntheticHoldKeyUpEvents = [keyUpEvent]
+      }
     }
-
-    syntheticHoldKeyUpEvents = keyUpEvents
-    keyDownEvent.post(tap: .cghidEventTap)
-    return true
+    return postSyntheticHoldKeyDown(
+      keyDownEvent,
+      reason: .retry,
+      delayMilliseconds: 0
+    )
   }
 
   private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -197,13 +263,13 @@ final class GlobalHotKeyService {
     switch disposition {
     case .passThrough:
       return Unmanaged.passUnretained(event)
-    case .captureForSyntheticForwarding:
-      captureForSyntheticForwarding(event)
+    case .startSyntheticHoldKeyDown:
+      startSyntheticHoldKeyDown(event)
       return nil
     case .suppress:
       return nil
-    case .startSyntheticHold:
-      startSyntheticHold(keyUpEvent: event)
+    case .storeSyntheticHoldKeyUp:
+      storeSyntheticHoldKeyUp(event)
       return nil
     case .releaseSyntheticHold:
       releaseSyntheticHold(fallbackKeyUpEvent: event)
@@ -214,28 +280,58 @@ final class GlobalHotKeyService {
     }
   }
 
-  private func captureForSyntheticForwarding(_ event: CGEvent) {
-    guard let capturedEvent = event.copy() else {
+  private func startSyntheticHoldKeyDown(_ event: CGEvent) {
+    guard let replayKeyDownEvent = event.copy() else {
       return
     }
 
-    capturedEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
-    capturedKeyDownEvent = capturedEvent
+    replayKeyDownEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
+    syntheticHoldKeyDownTemplate = replayKeyDownEvent.copy()
+    syntheticHoldKeyUpTemplate = makeSyntheticReleaseEvent(from: event)
+    if let keyUpEvent = syntheticHoldKeyUpTemplate?.copy() {
+      syntheticHoldKeyUpEvents = [keyUpEvent]
+    }
+    syntheticHoldKeyDownWasSent = false
+
+    let delayMilliseconds = syntheticHoldKeyDownDelayMilliseconds
+    guard delayMilliseconds > 0 else {
+      _ = postSyntheticHoldKeyDown(
+        replayKeyDownEvent,
+        reason: .initial,
+        delayMilliseconds: 0
+      )
+      return
+    }
+
+    cancelPendingSyntheticHoldKeyDownReplay()
+    pendingSyntheticHoldKeyDownEvent = replayKeyDownEvent
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self, let event = self.pendingSyntheticHoldKeyDownEvent else {
+        return
+      }
+      self.pendingSyntheticHoldKeyDownWorkItem = nil
+      self.pendingSyntheticHoldKeyDownEvent = nil
+      _ = self.postSyntheticHoldKeyDown(
+        event,
+        reason: .initial,
+        delayMilliseconds: delayMilliseconds
+      )
+    }
+    pendingSyntheticHoldKeyDownWorkItem = workItem
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + .milliseconds(delayMilliseconds),
+      execute: workItem
+    )
   }
 
-  private func startSyntheticHold(keyUpEvent: CGEvent) {
-    guard let replayKeyDownEvent = capturedKeyDownEvent,
-          let replayKeyUpEvent = keyUpEvent.copy() else {
-      capturedKeyDownEvent = nil
+  private func storeSyntheticHoldKeyUp(_ event: CGEvent) {
+    guard let replayKeyUpEvent = event.copy() else {
       return
     }
 
-    capturedKeyDownEvent = nil
     replayKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
+    syntheticHoldKeyUpTemplate = replayKeyUpEvent.copy()
     syntheticHoldKeyUpEvents = [replayKeyUpEvent]
-    syntheticHoldKeyDownTemplate = replayKeyDownEvent.copy()
-    syntheticHoldKeyUpTemplates = [replayKeyUpEvent].compactMap { $0.copy() }
-    replayKeyDownEvent.post(tap: .cghidEventTap)
   }
 
   private func releaseSyntheticHold(fallbackKeyUpEvent: CGEvent) {
@@ -257,7 +353,32 @@ final class GlobalHotKeyService {
     }
 
     replayKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
+    syntheticHoldKeyDownTemplate = nil
+    syntheticHoldKeyUpTemplate = nil
+    syntheticHoldKeyUpEvents = []
+    syntheticHoldKeyDownWasSent = false
     replayKeyUpEvent.post(tap: .cghidEventTap)
+  }
+
+  private func makeSyntheticReleaseEvent(from event: CGEvent) -> CGEvent? {
+    guard let replayKeyUpEvent = event.copy() else {
+      return nil
+    }
+
+    replayKeyUpEvent.flags = releaseFlags(from: event.flags)
+    replayKeyUpEvent.setIntegerValueField(.eventSourceUserData, value: Self.delayedReplayUserData)
+    return replayKeyUpEvent
+  }
+
+  private func releaseFlags(from flags: CGEventFlags) -> CGEventFlags {
+    var rawValue = flags.rawValue
+    for key in shortcut?.keys ?? [] {
+      rawValue &= ~key.releaseRawFlagMask
+      if let modifier = key.modifier {
+        rawValue &= ~modifier.eventFlag.rawValue
+      }
+    }
+    return CGEventFlags(rawValue: rawValue)
   }
 }
 
@@ -289,6 +410,42 @@ private extension ShortcutModifiers {
   }
 }
 
+private extension DoubaoShortcutKey {
+  var releaseRawFlagMask: UInt64 {
+    switch self {
+    case .leftControl:
+      return 0x0000_0001
+    case .rightControl:
+      return 0x0000_2000
+    case .leftOption:
+      return 0x0000_0020
+    case .rightOption:
+      return 0x0000_0040
+    case .leftCommand:
+      return 0x0000_0008
+    case .rightCommand:
+      return 0x0000_0010
+    case .function:
+      return CGEventFlags.maskSecondaryFn.rawValue
+    }
+  }
+}
+
+private extension ShortcutModifiers {
+  var eventFlag: CGEventFlags {
+    switch self {
+    case .control:
+      return .maskControl
+    case .option:
+      return .maskAlternate
+    case .command:
+      return .maskCommand
+    default:
+      return []
+    }
+  }
+}
+
 enum GlobalHotKeyError: Error, CustomStringConvertible {
   case eventTapInstallFailed
 
@@ -302,9 +459,9 @@ enum GlobalHotKeyError: Error, CustomStringConvertible {
 
 enum GlobalHotKeyEventDisposition: Equatable {
   case passThrough
-  case captureForSyntheticForwarding
+  case startSyntheticHoldKeyDown
   case suppress
-  case startSyntheticHold
+  case storeSyntheticHoldKeyUp
   case releaseSyntheticHold
   case forwardSyntheticKeyUp
 }
@@ -341,6 +498,53 @@ struct GlobalHotKeyEventLog {
   }
 }
 
+enum GlobalHotKeySyntheticReplayReason: String {
+  case initial
+  case retry
+}
+
+struct GlobalHotKeySyntheticReplayLog {
+  let reason: GlobalHotKeySyntheticReplayReason
+  let delayMilliseconds: Int
+  let sent: Bool
+  let keyCode: UInt16
+  let flags: UInt64
+  let eventSourceUserData: Int64
+  let eventSourceStateID: Int64
+
+  var message: String {
+    [
+      "synthetic keyDown replay",
+      "reason=\(reason.rawValue)",
+      "delayMs=\(delayMilliseconds)",
+      "sent=\(sent)",
+      "keyCode=\(keyCode)",
+      "flags=0x\(String(flags, radix: 16))",
+      "eventSourceUserData=\(eventSourceUserData)",
+      "eventSourceStateID=\(eventSourceStateID)"
+    ].joined(separator: ", ")
+  }
+}
+
+struct GlobalHotKeySyntheticResetResult {
+  let hadKeyDownTemplate: Bool
+  let hadPendingReplay: Bool
+  let keyDownWasSent: Bool
+  let sentSyntheticKeyUp: Bool
+  let clearedTracking: Bool
+
+  var message: String {
+    [
+      "shortcut state reset",
+      "hadKeyDownTemplate=\(hadKeyDownTemplate)",
+      "hadPendingReplay=\(hadPendingReplay)",
+      "keyDownWasSent=\(keyDownWasSent)",
+      "sentSyntheticKeyUp=\(sentSyntheticKeyUp)",
+      "clearedTracking=\(clearedTracking)"
+    ].joined(separator: ", ")
+  }
+}
+
 private extension CGEvent {
   func logEvent(
     type: CGEventType,
@@ -360,6 +564,22 @@ private extension CGEvent {
       eventSourceUnixProcessID: getIntegerValueField(.eventSourceUnixProcessID),
       eventSourceStateID: getIntegerValueField(.eventSourceStateID),
       note: note
+    )
+  }
+
+  func syntheticReplayLog(
+    reason: GlobalHotKeySyntheticReplayReason,
+    delayMilliseconds: Int,
+    sent: Bool
+  ) -> GlobalHotKeySyntheticReplayLog {
+    GlobalHotKeySyntheticReplayLog(
+      reason: reason,
+      delayMilliseconds: delayMilliseconds,
+      sent: sent,
+      keyCode: keyCode,
+      flags: UInt64(flags.rawValue),
+      eventSourceUserData: getIntegerValueField(.eventSourceUserData),
+      eventSourceStateID: getIntegerValueField(.eventSourceStateID)
     )
   }
 }

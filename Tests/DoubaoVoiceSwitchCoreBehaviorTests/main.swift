@@ -180,10 +180,16 @@ func testInputSourceHandoffRestoresOriginalInputSourceAfterSecondShortPress() th
   )
 }
 
-func testInputSourceHandoffUsesFallbackOriginalInputSourceWhenAlreadyUsingDoubao() throws {
+func testInputSourceHandoffIgnoresShortcutWhenAlreadyUsingDoubao() throws {
   let controller = InputSourceHandoffController(
     longPressThresholdMilliseconds: 500,
     longPressRestoreDelayMilliseconds: 180
+  )
+
+  try expectEqual(
+    controller.shouldPassThroughShortcut(currentInputSource: .doubao),
+    true,
+    "当前已经是豆包输入法且没有 active handoff 时应透传快捷键给豆包"
   )
 
   try expectEqual(
@@ -192,23 +198,17 @@ func testInputSourceHandoffUsesFallbackOriginalInputSourceWhenAlreadyUsingDoubao
       fallbackOriginalInputSourceID: "com.apple.inputmethod.SCIM.ITABC"
     ),
     [],
-    "当前已经是豆包输入法时不应重复切换"
+    "当前已经是豆包输入法时，即使有 fallback，也不应启动接力"
   )
   try expectEqual(
     controller.shortcutLongPressThresholdReached(),
-    true,
-    "fallback 接力也应通过 timer 进入长按状态"
+    false,
+    "当前已经是豆包输入法时不应进入长按状态"
   )
   try expectEqual(
     controller.shortcutBecameInactive(),
-    [
-      .scheduleRestoreInputSource(
-        "com.apple.inputmethod.SCIM.ITABC",
-        delayMilliseconds: 180,
-        reason: .longPressRelease
-      )
-    ],
-    "当前已经停在豆包输入法时，应使用最近一次非豆包输入法作为恢复目标"
+    [],
+    "当前已经是豆包输入法时不应恢复到 fallback 输入法"
   )
 }
 
@@ -246,6 +246,33 @@ func testLongPressThresholdPreferenceClampsToSupportedRange() throws {
   )
 }
 
+func testLongPressThresholdPreferenceDetectsNearThresholdPresses() throws {
+  try expectEqual(
+    LongPressThresholdPreference.isNearThresholdLongPress(
+      pressDurationMilliseconds: 99,
+      thresholdMilliseconds: 100
+    ),
+    false,
+    "低于阈值的按压不应提示长按判定"
+  )
+  try expectEqual(
+    LongPressThresholdPreference.isNearThresholdLongPress(
+      pressDurationMilliseconds: 115,
+      thresholdMilliseconds: 100
+    ),
+    true,
+    "刚超过阈值的长按应提示用户可增大长按判断时长"
+  )
+  try expectEqual(
+    LongPressThresholdPreference.isNearThresholdLongPress(
+      pressDurationMilliseconds: 260,
+      thresholdMilliseconds: 100
+    ),
+    false,
+    "明显长按不应展示误判提示"
+  )
+}
+
 func testInputSourceHandoffUpdatesLongPressThreshold() throws {
   let controller = InputSourceHandoffController()
 
@@ -258,7 +285,7 @@ func testInputSourceHandoffUpdatesLongPressThreshold() throws {
   )
 }
 
-func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() throws {
+func testShortcutForwardingStartsHandoffHoldImmediatelyAndStoresShortRelease() throws {
   let policy = ShortcutEventForwardingPolicy()
 
   try expectEqual(
@@ -267,8 +294,8 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
       releasePressKind: .short,
       isSuppressionWindowActive: false
     ),
-    .captureForSyntheticForwarding,
-    "从非豆包切换时，首次 keyDown 应只捕获，不应按固定 500ms 自动转发"
+    .startSyntheticHoldKeyDown,
+    "从非豆包切换后，首次 keyDown 应立即转发给豆包，不应等待长按阈值"
   )
   try expectEqual(
     policy.keyDownForwarding(
@@ -305,8 +332,8 @@ func testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions() t
       isSuppressionWindowActive: false,
       isPairedWithSuppressedKeyDown: false
     ),
-    .startSyntheticHold,
-    "从非豆包切换后的第一次短按应启动合成持有，不应立即补发 keyUp"
+    .storeSyntheticHoldKeyUp,
+    "从非豆包切换后的第一次短按释放应只保存 keyUp，不应结束合成持有"
   )
   try expectEqual(
     policy.keyUpForwarding(
@@ -391,7 +418,7 @@ func testInputSourceHandoffDoesNotDuplicateSelectionWhileActive() throws {
   )
 }
 
-func testInputSourceHandoffRetriesShortClickActivationOnceBeforeCancelling() throws {
+func testInputSourceHandoffCancelsShortClickActivationWithoutRetrying() throws {
   let controller = InputSourceHandoffController(longPressRestoreDelayMilliseconds: 180)
 
   _ = controller.shortcutBecameActive(currentInputSource: .other("com.apple.inputmethod.SCIM.ITABC"))
@@ -403,21 +430,6 @@ func testInputSourceHandoffRetriesShortClickActivationOnceBeforeCancelling() thr
     "第一次短按后应等待豆包语音启动确认"
   )
   try expectEqual(
-    controller.retryShortClickActivationIfNeeded(),
-    .restartSyntheticHoldFromCapturedTemplate,
-    "第一次 watchdog 到期且语音未启动时应使用捕获的真实事件模板重试"
-  )
-  try expectEqual(
-    controller.stateDescription,
-    "shortClickSyntheticHoldRetryActive",
-    "进入重试后应记录 retry 状态，避免无限重试"
-  )
-  try expectEqual(
-    controller.retryShortClickActivationIfNeeded(),
-    nil,
-    "同一次短按只允许一次自动重试"
-  )
-  try expectEqual(
     controller.cancelHandoff(),
     [
       .scheduleRestoreInputSource(
@@ -426,7 +438,67 @@ func testInputSourceHandoffRetriesShortClickActivationOnceBeforeCancelling() thr
         reason: .cancelHandoff
       )
     ],
-    "第二次 watchdog 到期仍未启动时应取消接力并恢复原输入法"
+    "第一次 watchdog 到期仍未启动时应取消接力并恢复原输入法"
+  )
+}
+
+func testVoiceActivationRetryPolicyRetriesOnceBeforeFailing() throws {
+  let policy = VoiceActivationRetryPolicy(
+    maxRetryCount: 1,
+    firstReplayDelayMilliseconds: 80,
+    probeDelayMilliseconds: 300,
+    retryKeyDownDelayMilliseconds: 80,
+    retryProbeDelayMilliseconds: 600
+  )
+
+  try expectEqual(
+    policy.firstReplayDelayMilliseconds,
+    80,
+    "首次 synthetic keyDown 应等待输入法切换链路稳定后再转发"
+  )
+  try expectEqual(
+    policy.decision(isRunningInput: true, completedRetryCount: 0),
+    .confirmed,
+    "检测到音频流时应立即确认启动成功"
+  )
+  try expectEqual(
+    policy.decision(isRunningInput: false, completedRetryCount: 0),
+    .retry(retryNumber: 1, retryKeyDownDelayMilliseconds: 80, nextProbeDelayMilliseconds: 600),
+    "首次 probe 未检测到音频流时应进行一次重置式 retry"
+  )
+  try expectEqual(
+    policy.decision(isRunningInput: false, completedRetryCount: 1),
+    .failed,
+    "一次重置式 retry 后仍没有音频流时应失败"
+  )
+}
+
+func testVoiceEndRestorePolicyWaitsForInputToStopUntilDeadline() throws {
+  let policy = VoiceEndRestorePolicy(
+    minimumDelayMilliseconds: 180,
+    maximumDelayMilliseconds: 1_000,
+    probeElapsedMilliseconds: [0, 100, 200, 400, 1_000]
+  )
+
+  try expectEqual(
+    policy.decision(elapsedMilliseconds: 0, isRunningInput: false),
+    .continueProbing(nextProbeElapsedMilliseconds: 100),
+    "未达到最小恢复延迟前，即使音频流已停止也应继续观察"
+  )
+  try expectEqual(
+    policy.decision(elapsedMilliseconds: 200, isRunningInput: false),
+    .restore(reason: .detectedInputStopped),
+    "达到最小恢复延迟后，如果音频流已停止，应恢复原输入法"
+  )
+  try expectEqual(
+    policy.decision(elapsedMilliseconds: 400, isRunningInput: true),
+    .continueProbing(nextProbeElapsedMilliseconds: 1_000),
+    "未达到上限且音频流仍在运行时应继续观察"
+  )
+  try expectEqual(
+    policy.decision(elapsedMilliseconds: 1_000, isRunningInput: true),
+    .restore(reason: .deadlineReached),
+    "达到 1000ms 上限后，即使音频流仍在运行也必须恢复原输入法"
   )
 }
 
@@ -444,14 +516,17 @@ let tests: [(String, () throws -> Void)] = [
   ("testInputSourceHandoffSelectsDoubaoAndRestoresOriginalInputSource", testInputSourceHandoffSelectsDoubaoAndRestoresOriginalInputSource),
   ("testInputSourceHandoffKeepsDoubaoInputSourceAfterFirstShortPress", testInputSourceHandoffKeepsDoubaoInputSourceAfterFirstShortPress),
   ("testInputSourceHandoffRestoresOriginalInputSourceAfterSecondShortPress", testInputSourceHandoffRestoresOriginalInputSourceAfterSecondShortPress),
-  ("testInputSourceHandoffUsesFallbackOriginalInputSourceWhenAlreadyUsingDoubao", testInputSourceHandoffUsesFallbackOriginalInputSourceWhenAlreadyUsingDoubao),
+  ("testInputSourceHandoffIgnoresShortcutWhenAlreadyUsingDoubao", testInputSourceHandoffIgnoresShortcutWhenAlreadyUsingDoubao),
   ("testInputSourceHandoffDoesNotInferLongPressFromReleaseDuration", testInputSourceHandoffDoesNotInferLongPressFromReleaseDuration),
   ("testLongPressThresholdPreferenceClampsToSupportedRange", testLongPressThresholdPreferenceClampsToSupportedRange),
+  ("testLongPressThresholdPreferenceDetectsNearThresholdPresses", testLongPressThresholdPreferenceDetectsNearThresholdPresses),
   ("testInputSourceHandoffUpdatesLongPressThreshold", testInputSourceHandoffUpdatesLongPressThreshold),
-  ("testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions", testShortcutForwardingCapturesHandoffKeyDownAndSynthesizesDoubaoActions),
+  ("testShortcutForwardingStartsHandoffHoldImmediatelyAndStoresShortRelease", testShortcutForwardingStartsHandoffHoldImmediatelyAndStoresShortRelease),
   ("testInputSourceHandoffBypassesWhenAlreadyUsingDoubaoInputSource", testInputSourceHandoffBypassesWhenAlreadyUsingDoubaoInputSource),
   ("testInputSourceHandoffDoesNotDuplicateSelectionWhileActive", testInputSourceHandoffDoesNotDuplicateSelectionWhileActive),
-  ("testInputSourceHandoffRetriesShortClickActivationOnceBeforeCancelling", testInputSourceHandoffRetriesShortClickActivationOnceBeforeCancelling)
+  ("testInputSourceHandoffCancelsShortClickActivationWithoutRetrying", testInputSourceHandoffCancelsShortClickActivationWithoutRetrying),
+  ("testVoiceActivationRetryPolicyRetriesOnceBeforeFailing", testVoiceActivationRetryPolicyRetriesOnceBeforeFailing),
+  ("testVoiceEndRestorePolicyWaitsForInputToStopUntilDeadline", testVoiceEndRestorePolicyWaitsForInputToStopUntilDeadline)
 ]
 
 do {

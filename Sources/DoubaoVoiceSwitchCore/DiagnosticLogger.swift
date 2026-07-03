@@ -5,7 +5,6 @@ public enum DiagnosticLogCategory: String, Equatable {
   case shortcut
   case inputSource
   case voiceReadiness
-  case retry
   case restoration
 }
 

@@ -15,10 +15,6 @@ public enum InputSourcePressKind: String, Equatable, Sendable {
   case syntheticHoldRelease
 }
 
-public enum InputSourceShortcutRetryAction: Equatable, Sendable {
-  case restartSyntheticHoldFromCapturedTemplate
-}
-
 public final class InputSourceHandoffController {
   public private(set) var longPressThresholdMilliseconds: Int
   private let longPressRestoreDelayMilliseconds: Int
@@ -44,13 +40,29 @@ public final class InputSourceHandoffController {
       return .short
     case .shortClickSyntheticHoldStopKeyDown:
       return .syntheticHoldRelease
-    case .idle, .shortClickSyntheticHoldActive, .shortClickSyntheticHoldRetryActive:
+    case .idle, .shortClickSyntheticHoldActive:
       return nil
     }
   }
 
   public var isAwaitingLongPressThreshold: Bool {
     if case .handoffKeyDown = state {
+      return true
+    }
+    return false
+  }
+
+  public var shouldContinueVoiceActivationProbe: Bool {
+    switch state {
+    case .handoffKeyDown, .longPressActive, .shortClickSyntheticHoldActive:
+      return true
+    case .idle, .shortClickSyntheticHoldStopKeyDown:
+      return false
+    }
+  }
+
+  public func shouldPassThroughShortcut(currentInputSource: InputSourceIdentity) -> Bool {
+    if case .idle = state, currentInputSource == .doubao {
       return true
     }
     return false
@@ -66,15 +78,14 @@ public final class InputSourceHandoffController {
   ) -> [InputSourceHandoffAction] {
     switch state {
     case .idle:
-      guard let restorationID = currentInputSource.restorationID ?? fallbackOriginalInputSourceID,
+      guard let restorationID = currentInputSource.restorationID,
             !restorationID.isEmpty else {
         return []
       }
 
       state = .handoffKeyDown(originalInputSourceID: restorationID)
-      return currentInputSource.restorationID == nil ? [] : [.selectDoubaoInputSource]
-    case let .shortClickSyntheticHoldActive(originalInputSourceID),
-         let .shortClickSyntheticHoldRetryActive(originalInputSourceID):
+      return [.selectDoubaoInputSource]
+    case let .shortClickSyntheticHoldActive(originalInputSourceID):
       state = .shortClickSyntheticHoldStopKeyDown(originalInputSourceID: originalInputSourceID)
       return []
     case .handoffKeyDown, .longPressActive, .shortClickSyntheticHoldStopKeyDown:
@@ -114,18 +125,9 @@ public final class InputSourceHandoffController {
           reason: .secondShortClickRelease
         )
       ]
-    case .idle, .shortClickSyntheticHoldActive, .shortClickSyntheticHoldRetryActive:
+    case .idle, .shortClickSyntheticHoldActive:
       return []
     }
-  }
-
-  public func retryShortClickActivationIfNeeded() -> InputSourceShortcutRetryAction? {
-    guard case let .shortClickSyntheticHoldActive(originalInputSourceID) = state else {
-      return nil
-    }
-
-    state = .shortClickSyntheticHoldRetryActive(originalInputSourceID: originalInputSourceID)
-    return .restartSyntheticHoldFromCapturedTemplate
   }
 
   public func cancelHandoff() -> [InputSourceHandoffAction] {
@@ -149,7 +151,6 @@ private enum State {
   case handoffKeyDown(originalInputSourceID: String)
   case longPressActive(originalInputSourceID: String)
   case shortClickSyntheticHoldActive(originalInputSourceID: String)
-  case shortClickSyntheticHoldRetryActive(originalInputSourceID: String)
   case shortClickSyntheticHoldStopKeyDown(originalInputSourceID: String)
 
   var originalInputSourceID: String? {
@@ -159,7 +160,6 @@ private enum State {
     case let .handoffKeyDown(originalInputSourceID),
          let .longPressActive(originalInputSourceID),
          let .shortClickSyntheticHoldActive(originalInputSourceID),
-         let .shortClickSyntheticHoldRetryActive(originalInputSourceID),
          let .shortClickSyntheticHoldStopKeyDown(originalInputSourceID):
       return originalInputSourceID
     }
@@ -175,8 +175,6 @@ private enum State {
       return "longPressActive"
     case .shortClickSyntheticHoldActive:
       return "shortClickSyntheticHoldActive"
-    case .shortClickSyntheticHoldRetryActive:
-      return "shortClickSyntheticHoldRetryActive"
     case .shortClickSyntheticHoldStopKeyDown:
       return "shortClickSyntheticHoldStopKeyDown"
     }

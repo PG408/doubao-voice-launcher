@@ -18,24 +18,32 @@ final class AppModel: ObservableObject {
   private let audioInputProbe = DoubaoAudioInputProbe()
   private let handoffController = InputSourceHandoffController()
   private let forwardingPolicy = ShortcutEventForwardingPolicy()
+  private let voiceActivationRetryPolicy = VoiceActivationRetryPolicy()
+  private let voiceEndRestorePolicy = VoiceEndRestorePolicy()
   private let launchAtLoginService = LaunchAtLoginService()
+  private let toastPresenter = ToastPresenter()
   private let shortcutSuppressionMilliseconds = 300
-  private let shortClickFirstWatchdogMilliseconds = 500
-  private let shortClickRetryWatchdogMilliseconds = 1000
-  private let shortClickRetryResetMilliseconds = 100
+  private let voiceActivationFailureToastMilliseconds = 1_500
+  private let nearThresholdLongPressToastMilliseconds = 3_000
+  private let nearThresholdLongPressToastCooldownMilliseconds = 3_000
 
   private var readinessTimer: Timer?
   private var registeredShortcut: DoubaoShortcut?
   private var pendingRestoreWorkItem: DispatchWorkItem?
   private var pendingLongPressWorkItem: DispatchWorkItem?
-  private var pendingShortClickActivationWatchdogWorkItem: DispatchWorkItem?
+  private var pendingVoiceActivationProbeWorkItem: DispatchWorkItem?
+  private var pendingVoiceActivationRetryKeyDownWorkItem: DispatchWorkItem?
   private var shortcutDownDate: Date?
   private var shortcutSuppressionUntil: Date?
   private var pendingSuppressedShortcutKeyUps = 0
   private var shortcutStartedFromInputSourceHandoff = false
+  private var lastNearThresholdLongPressToastDate: Date?
   private var lastRestorableInputSourceID: String?
   private var lastLoggedStatus: AppStatus?
   private var lastLoggedPrerequisites: [Bool]?
+  private var voiceActivationAttemptStartedAt: Date?
+  private var firstSyntheticReplaySentAt: Date?
+  private var retrySyntheticReplaySentAt: Date?
 
   private var accessibilityTrusted = false
   private var doubaoInputSourceAvailable = false
@@ -48,6 +56,8 @@ final class AppModel: ObservableObject {
     self.probe = probe
     self.hotKeyService = hotKeyService
     self.logger = logger ?? DiagnosticLogger(logDirectory: defaultLogDirectory(), retentionDays: 7)
+    self.hotKeyService.syntheticHoldKeyDownDelayMilliseconds =
+      voiceActivationRetryPolicy.firstReplayDelayMilliseconds
     loadLongPressThresholdPreference()
     configureHotKeyCallbacks()
     recordLaunchSource()
@@ -197,12 +207,12 @@ final class AppModel: ObservableObject {
   }
 
   func restoreInputSourceIfNeeded(reason: String) {
-    pendingShortClickActivationWatchdogWorkItem?.cancel()
-    pendingShortClickActivationWatchdogWorkItem = nil
+    cancelVoiceActivationProbe()
     if hotKeyService.releaseSyntheticHoldIfNeeded() {
       record(.shortcut, "released synthetic hold, releaseReason=\(reason)")
     }
     applyHandoffActions(handoffController.cancelHandoff(), reason: reason)
+    clearVoiceActivationTracking()
   }
 
   private func configureHotKeyCallbacks() {
@@ -212,6 +222,14 @@ final class AppModel: ObservableObject {
           return
         }
         self.record(.shortcut, event.message)
+      }
+    }
+    hotKeyService.onSyntheticHoldKeyDownReplay = { [weak self] event in
+      MainActor.assumeIsolated {
+        guard let self, self.status == .running else {
+          return
+        }
+        self.handleSyntheticHoldKeyDownReplay(event)
       }
     }
     hotKeyService.onKeyDown = { [weak self] shortcut in
@@ -278,11 +296,19 @@ final class AppModel: ObservableObject {
     pendingRestoreWorkItem = nil
     pendingLongPressWorkItem?.cancel()
     pendingLongPressWorkItem = nil
-    pendingShortClickActivationWatchdogWorkItem?.cancel()
-    pendingShortClickActivationWatchdogWorkItem = nil
+    cancelVoiceActivationProbe()
+    clearVoiceActivationTracking()
     shortcutDownDate = now
     let stateBefore = handoffController.stateDescription
     let currentInputSource = inputSourceService.currentInputSource()
+    if handoffController.shouldPassThroughShortcut(currentInputSource: currentInputSource) {
+      record(
+        .shortcut,
+        "shortcut passed through because current input source is already Doubao, shortcut=\(shortcut.displayText), handoffState=\(handoffController.stateDescription)"
+      )
+      return .passThrough
+    }
+
     rememberRestorableInputSource(currentInputSource)
     let actions = handoffController.shortcutBecameActive(
       currentInputSource: currentInputSource,
@@ -309,8 +335,13 @@ final class AppModel: ObservableObject {
     switch keyDownForwarding {
     case .passThrough:
       return .passThrough
-    case .captureForSyntheticForwarding:
-      return .captureForSyntheticForwarding
+    case .startSyntheticHoldKeyDown:
+      voiceActivationAttemptStartedAt = now
+      record(
+        .voiceReadiness,
+        "first synthetic keyDown replay scheduled, firstReplayDelayMs=\(voiceActivationRetryPolicy.firstReplayDelayMilliseconds), firstProbeAfterReplayMs=\(voiceActivationRetryPolicy.probeDelayMilliseconds), elapsedSinceAttemptMs=0, handoffState=\(handoffController.stateDescription)"
+      )
+      return .startSyntheticHoldKeyDown
     case .suppress:
       return .suppress
     }
@@ -323,6 +354,7 @@ final class AppModel: ObservableObject {
 
     let now = Date()
     let releasePressKind = handoffController.releasePressKind
+    let startedFromInputSourceHandoffBeforeRelease = shortcutStartedFromInputSourceHandoff
     let isSuppressionActive = isShortcutSuppressionActive(at: now)
     let isPairedWithSuppressedKeyDown = pendingSuppressedShortcutKeyUps > 0
     if isPairedWithSuppressedKeyDown {
@@ -359,21 +391,25 @@ final class AppModel: ObservableObject {
       "keyUp \(storedShortcut.displayText), keys=\(storedShortcut.storageValue), durationMs=\(pressDurationMilliseconds), releasePressKind=\(pressKind), handoffStateBefore=\(stateBefore), handoffStateAfter=\(handoffController.stateDescription), keyUpForwarding=\(keyUpForwarding)"
     )
     applyHandoffActions(actions, reason: "shortcut keyUp")
+    showNearThresholdLongPressToastIfNeeded(
+      pressDurationMilliseconds: pressDurationMilliseconds,
+      releasePressKind: releasePressKind,
+      startedFromInputSourceHandoff: startedFromInputSourceHandoffBeforeRelease,
+      now: now
+    )
     switch keyUpForwarding {
     case .passThrough:
       return .passThrough
     case .suppress:
       return .suppress
-    case .startSyntheticHold:
-      startShortcutSuppressionWindow(reason: "startSyntheticHold", now: now)
-      scheduleShortClickActivationWatchdog(
-        attempt: 1,
-        delayMilliseconds: shortClickFirstWatchdogMilliseconds
-      )
-      return .startSyntheticHold
+    case .storeSyntheticHoldKeyUp:
+      startShortcutSuppressionWindow(reason: "storeSyntheticHoldKeyUp", now: now)
+      return .storeSyntheticHoldKeyUp
     case .releaseSyntheticHold:
+      cancelVoiceActivationProbe()
       return .releaseSyntheticHold
     case .forwardSyntheticKeyUp:
+      cancelVoiceActivationProbe()
       return .forwardSyntheticKeyUp
     }
   }
@@ -392,15 +428,9 @@ final class AppModel: ObservableObject {
         self.pendingLongPressWorkItem = nil
         let stateBefore = self.handoffController.stateDescription
         let didTrigger = self.handoffController.shortcutLongPressThresholdReached()
-        let didForwardKeyDown = didTrigger && self.shortcutStartedFromInputSourceHandoff
-          ? self.hotKeyService.forwardCapturedKeyDown()
-          : false
-        if didForwardKeyDown {
-          self.startShortcutSuppressionWindow(reason: "longPressSyntheticKeyDown", now: Date())
-        }
         self.record(
           .shortcut,
-          "longPressThresholdReached thresholdMs=\(thresholdMilliseconds), triggered=\(didTrigger), syntheticKeyDownForwarded=\(didForwardKeyDown), handoffStateBefore=\(stateBefore), handoffStateAfter=\(self.handoffController.stateDescription)"
+          "longPressThresholdReached thresholdMs=\(thresholdMilliseconds), triggered=\(didTrigger), syntheticKeyDownAlreadyForwarded=\(self.shortcutStartedFromInputSourceHandoff), handoffStateBefore=\(stateBefore), handoffStateAfter=\(self.handoffController.stateDescription)"
         )
       }
     }
@@ -411,17 +441,41 @@ final class AppModel: ObservableObject {
     )
   }
 
-  private func scheduleShortClickActivationWatchdog(attempt: Int, delayMilliseconds: Int) {
-    pendingShortClickActivationWatchdogWorkItem?.cancel()
-    let workItem = DispatchWorkItem { [weak self] in
-      MainActor.assumeIsolated {
-        self?.runShortClickActivationWatchdog(attempt: attempt)
-      }
+  private func handleSyntheticHoldKeyDownReplay(_ event: GlobalHotKeySyntheticReplayLog) {
+    let now = Date()
+    switch event.reason {
+    case .initial:
+      firstSyntheticReplaySentAt = now
+    case .retry:
+      retrySyntheticReplaySentAt = now
     }
-    pendingShortClickActivationWatchdogWorkItem = workItem
+
     record(
       .voiceReadiness,
-      "scheduled short click activation watchdog attempt=\(attempt), delayMs=\(delayMilliseconds), handoffState=\(handoffController.stateDescription)"
+      "\(event.message), elapsedSinceAttemptMs=\(elapsedMilliseconds(since: voiceActivationAttemptStartedAt)), elapsedSinceFirstReplayMs=\(elapsedMilliseconds(since: firstSyntheticReplaySentAt)), elapsedSinceRetryReplayMs=\(elapsedMilliseconds(since: retrySyntheticReplaySentAt)), handoffState=\(handoffController.stateDescription)"
+    )
+
+    guard event.reason == .initial else {
+      return
+    }
+
+    scheduleVoiceActivationProbe(
+      completedRetryCount: 0,
+      delayMilliseconds: voiceActivationRetryPolicy.probeDelayMilliseconds
+    )
+  }
+
+  private func scheduleVoiceActivationProbe(completedRetryCount: Int, delayMilliseconds: Int) {
+    pendingVoiceActivationProbeWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        self?.runVoiceActivationProbe(completedRetryCount: completedRetryCount)
+      }
+    }
+    pendingVoiceActivationProbeWorkItem = workItem
+    record(
+      .voiceReadiness,
+      "scheduled voice activation probe completedRetryCount=\(completedRetryCount), delayMs=\(delayMilliseconds), elapsedSinceAttemptMs=\(elapsedMilliseconds(since: voiceActivationAttemptStartedAt)), elapsedSinceFirstReplayMs=\(elapsedMilliseconds(since: firstSyntheticReplaySentAt)), elapsedSinceRetryReplayMs=\(elapsedMilliseconds(since: retrySyntheticReplaySentAt)), handoffState=\(handoffController.stateDescription)"
     )
     DispatchQueue.main.asyncAfter(
       deadline: .now() + .milliseconds(delayMilliseconds),
@@ -429,11 +483,11 @@ final class AppModel: ObservableObject {
     )
   }
 
-  private func runShortClickActivationWatchdog(attempt: Int) {
-    pendingShortClickActivationWatchdogWorkItem = nil
+  private func runVoiceActivationProbe(completedRetryCount: Int) {
+    pendingVoiceActivationProbeWorkItem = nil
 
     guard status == .running else {
-      record(.voiceReadiness, "short click activation watchdog skipped because status=\(status.title)")
+      record(.voiceReadiness, "voice activation probe skipped because status=\(status.title)")
       return
     }
 
@@ -441,77 +495,185 @@ final class AppModel: ObservableObject {
     guard inputSourceService.currentInputSource() == .doubao else {
       record(
         .voiceReadiness,
-        "short click activation watchdog cancelled because currentInputSource=\(inputSourceService.currentInputSource()), attempt=\(attempt), handoffState=\(stateBefore)"
+        "voice activation probe cancelled because currentInputSource=\(inputSourceService.currentInputSource()), completedRetryCount=\(completedRetryCount), handoffState=\(stateBefore)"
       )
       restoreInputSourceIfNeeded(reason: "shortClickActivationInputSourceChanged")
       return
     }
 
-    if audioInputProbe.isRunningInput() {
+    guard handoffController.shouldContinueVoiceActivationProbe else {
       record(
         .voiceReadiness,
-        "short click activation confirmed attempt=\(attempt), handoffState=\(stateBefore)"
+        "voice activation probe skipped because handoffState=\(stateBefore), completedRetryCount=\(completedRetryCount)"
       )
       return
     }
 
-    if attempt == 1,
-       let retryAction = handoffController.retryShortClickActivationIfNeeded() {
-      let didRelease = hotKeyService.releaseSyntheticHoldIfNeeded()
-      record(
-        .voiceReadiness,
-        "short click activation missed; retrying with captured synthetic hold template, attempt=\(attempt), retryAction=\(retryAction), releasedPreviousHold=\(didRelease), handoffStateBefore=\(stateBefore), handoffStateAfter=\(handoffController.stateDescription)"
-      )
-      scheduleShortClickActivationRetryKeyDown(action: retryAction)
-      return
-    }
-
-    let didRelease = hotKeyService.releaseSyntheticHoldIfNeeded()
+    let isRunningInput = audioInputProbe.isRunningInput()
     record(
       .voiceReadiness,
-      "short click activation failed; restoring input source, attempt=\(attempt), releasedSyntheticHold=\(didRelease), handoffState=\(handoffController.stateDescription)"
+      "voice activation probe result isRunningInput=\(isRunningInput), completedRetryCount=\(completedRetryCount), elapsedSinceAttemptMs=\(elapsedMilliseconds(since: voiceActivationAttemptStartedAt)), elapsedSinceFirstReplayMs=\(elapsedMilliseconds(since: firstSyntheticReplaySentAt)), elapsedSinceRetryReplayMs=\(elapsedMilliseconds(since: retrySyntheticReplaySentAt)), handoffState=\(stateBefore)"
     )
-    applyHandoffActions(handoffController.cancelHandoff(), reason: "short click activation watchdog")
+    switch voiceActivationRetryPolicy.decision(
+      isRunningInput: isRunningInput,
+      completedRetryCount: completedRetryCount
+    ) {
+    case .confirmed:
+      record(
+        .voiceReadiness,
+        "voice activation confirmed completedRetryCount=\(completedRetryCount), elapsedSinceAttemptMs=\(elapsedMilliseconds(since: voiceActivationAttemptStartedAt)), elapsedSinceFirstReplayMs=\(elapsedMilliseconds(since: firstSyntheticReplaySentAt)), elapsedSinceRetryReplayMs=\(elapsedMilliseconds(since: retrySyntheticReplaySentAt)), handoffState=\(stateBefore)"
+      )
+      clearVoiceActivationTracking()
+    case let .retry(retryNumber, retryKeyDownDelayMilliseconds, nextProbeDelayMilliseconds):
+      retryVoiceActivation(
+        retryNumber: retryNumber,
+        retryKeyDownDelayMilliseconds: retryKeyDownDelayMilliseconds,
+        nextProbeDelayMilliseconds: nextProbeDelayMilliseconds
+      )
+    case .failed:
+      failVoiceActivation(
+        reason: "voiceActivationProbeFailed",
+        completedRetryCount: completedRetryCount
+      )
+    }
   }
 
-  private func scheduleShortClickActivationRetryKeyDown(action: InputSourceShortcutRetryAction) {
-    pendingShortClickActivationWatchdogWorkItem?.cancel()
+  private func retryVoiceActivation(
+    retryNumber: Int,
+    retryKeyDownDelayMilliseconds: Int,
+    nextProbeDelayMilliseconds: Int
+  ) {
+    let resetResult = hotKeyService.resetSyntheticHoldForRetry()
+    record(
+      .voiceReadiness,
+      "voice activation retry reset started retryNumber=\(retryNumber), \(resetResult.message), retryKeyDownDelayMs=\(retryKeyDownDelayMilliseconds), nextProbeDelayMs=\(nextProbeDelayMilliseconds), elapsedSinceAttemptMs=\(elapsedMilliseconds(since: voiceActivationAttemptStartedAt)), elapsedSinceFirstReplayMs=\(elapsedMilliseconds(since: firstSyntheticReplaySentAt)), handoffState=\(handoffController.stateDescription)"
+    )
+    guard resetResult.hadKeyDownTemplate else {
+      failVoiceActivation(reason: "voiceActivationRetryKeyDownTemplateMissing", completedRetryCount: retryNumber - 1)
+      return
+    }
+
+    pendingVoiceActivationRetryKeyDownWorkItem?.cancel()
     let workItem = DispatchWorkItem { [weak self] in
       MainActor.assumeIsolated {
-        self?.sendShortClickActivationRetryKeyDown(action: action)
+        self?.sendVoiceActivationRetryKeyDown(
+          retryNumber: retryNumber,
+          nextProbeDelayMilliseconds: nextProbeDelayMilliseconds
+        )
       }
     }
-    pendingShortClickActivationWatchdogWorkItem = workItem
+    pendingVoiceActivationRetryKeyDownWorkItem = workItem
     DispatchQueue.main.asyncAfter(
-      deadline: .now() + .milliseconds(shortClickRetryResetMilliseconds),
+      deadline: .now() + .milliseconds(retryKeyDownDelayMilliseconds),
       execute: workItem
     )
   }
 
-  private func sendShortClickActivationRetryKeyDown(action: InputSourceShortcutRetryAction) {
-    pendingShortClickActivationWatchdogWorkItem = nil
-    guard status == .running, inputSourceService.currentInputSource() == .doubao else {
+  private func sendVoiceActivationRetryKeyDown(
+    retryNumber: Int,
+    nextProbeDelayMilliseconds: Int
+  ) {
+    pendingVoiceActivationRetryKeyDownWorkItem = nil
+    guard status == .running,
+          inputSourceService.currentInputSource() == .doubao,
+          handoffController.shouldContinueVoiceActivationProbe else {
       record(
         .voiceReadiness,
-        "short click activation retry stopped before keyDown, currentInputSource=\(inputSourceService.currentInputSource()), handoffState=\(handoffController.stateDescription)"
+        "voice activation retry keyDown cancelled retryNumber=\(retryNumber), currentInputSource=\(inputSourceService.currentInputSource()), handoffState=\(handoffController.stateDescription)"
       )
-      restoreInputSourceIfNeeded(reason: "shortClickActivationRetryStopped")
       return
     }
 
-    let didStart: Bool
-    switch action {
-    case .restartSyntheticHoldFromCapturedTemplate:
-      didStart = hotKeyService.restartSyntheticHoldFromCapturedTemplate()
-    }
-    startShortcutSuppressionWindow(reason: "shortClickRetrySyntheticKeyDown", now: Date())
+    let didSendKeyDown = hotKeyService.retrySyntheticHoldKeyDown()
     record(
       .voiceReadiness,
-      "short click activation retry keyDown sent, retryAction=\(action), didStart=\(didStart), handoffState=\(handoffController.stateDescription)"
+      "voice activation retry rebuilt keyDown sent retryNumber=\(retryNumber), didSend=\(didSendKeyDown), elapsedSinceAttemptMs=\(elapsedMilliseconds(since: voiceActivationAttemptStartedAt)), elapsedSinceFirstReplayMs=\(elapsedMilliseconds(since: firstSyntheticReplaySentAt)), handoffState=\(handoffController.stateDescription)"
     )
-    scheduleShortClickActivationWatchdog(
-      attempt: 2,
-      delayMilliseconds: shortClickRetryWatchdogMilliseconds
+    guard didSendKeyDown else {
+      failVoiceActivation(reason: "voiceActivationRetryKeyDownMissing", completedRetryCount: retryNumber)
+      return
+    }
+
+    scheduleVoiceActivationProbe(
+      completedRetryCount: retryNumber,
+      delayMilliseconds: nextProbeDelayMilliseconds
+    )
+  }
+
+  private func failVoiceActivation(reason: String, completedRetryCount: Int) {
+    cancelVoiceActivationProbe()
+    let didRelease = hotKeyService.releaseSyntheticHoldIfNeeded()
+    record(
+      .voiceReadiness,
+      "voice activation failed; restoring input source and asking user to retry, reason=\(reason), completedRetryCount=\(completedRetryCount), releasedSyntheticHold=\(didRelease), elapsedSinceAttemptMs=\(elapsedMilliseconds(since: voiceActivationAttemptStartedAt)), elapsedSinceFirstReplayMs=\(elapsedMilliseconds(since: firstSyntheticReplaySentAt)), elapsedSinceRetryReplayMs=\(elapsedMilliseconds(since: retrySyntheticReplaySentAt)), handoffState=\(handoffController.stateDescription)"
+    )
+    lastMessage = "豆包未启动，请再按一次"
+    shortcutStartedFromInputSourceHandoff = false
+    shortcutDownDate = nil
+    applyHandoffActions(handoffController.cancelHandoff(), reason: reason)
+    clearVoiceActivationTracking()
+    toastPresenter.show(
+      message: "豆包未启动，请再按一次",
+      durationMilliseconds: voiceActivationFailureToastMilliseconds
+    )
+  }
+
+  private func cancelVoiceActivationProbe() {
+    pendingVoiceActivationProbeWorkItem?.cancel()
+    pendingVoiceActivationProbeWorkItem = nil
+    pendingVoiceActivationRetryKeyDownWorkItem?.cancel()
+    pendingVoiceActivationRetryKeyDownWorkItem = nil
+  }
+
+  private func clearVoiceActivationTracking() {
+    voiceActivationAttemptStartedAt = nil
+    firstSyntheticReplaySentAt = nil
+    retrySyntheticReplaySentAt = nil
+  }
+
+  private func elapsedMilliseconds(since date: Date?) -> Int {
+    guard let date else {
+      return -1
+    }
+
+    return max(0, Int(Date().timeIntervalSince(date) * 1000))
+  }
+
+  private func showNearThresholdLongPressToastIfNeeded(
+    pressDurationMilliseconds: Int,
+    releasePressKind: InputSourcePressKind?,
+    startedFromInputSourceHandoff: Bool,
+    now: Date
+  ) {
+    let thresholdMilliseconds = handoffController.longPressThresholdMilliseconds
+    guard releasePressKind == .long,
+          startedFromInputSourceHandoff,
+          LongPressThresholdPreference.isNearThresholdLongPress(
+            pressDurationMilliseconds: pressDurationMilliseconds,
+            thresholdMilliseconds: thresholdMilliseconds
+          )
+    else {
+      return
+    }
+
+    let cooldownSeconds = Double(nearThresholdLongPressToastCooldownMilliseconds) / 1000
+    if let lastDate = lastNearThresholdLongPressToastDate,
+       now.timeIntervalSince(lastDate) < cooldownSeconds {
+      record(
+        .shortcut,
+        "near-threshold long press hint suppressed by cooldown, durationMs=\(pressDurationMilliseconds), thresholdMs=\(thresholdMilliseconds), toleranceMs=\(LongPressThresholdPreference.nearThresholdHintToleranceMilliseconds)"
+      )
+      return
+    }
+
+    lastNearThresholdLongPressToastDate = now
+    toastPresenter.show(
+      message: "本次识别为长按，可以在设置增大长按判断时长",
+      durationMilliseconds: nearThresholdLongPressToastMilliseconds
+    )
+    record(
+      .shortcut,
+      "near-threshold long press hint shown, durationMs=\(pressDurationMilliseconds), thresholdMs=\(thresholdMilliseconds), toleranceMs=\(LongPressThresholdPreference.nearThresholdHintToleranceMilliseconds)"
     )
   }
 
@@ -572,6 +734,30 @@ final class AppModel: ObservableObject {
     restoreReason: InputSourceRestoreReason
   ) {
     pendingRestoreWorkItem?.cancel()
+    if shouldMonitorVoiceEndRestore(restoreReason) {
+      scheduleVoiceEndRestoreInputSource(
+        inputSourceID,
+        initialDelayMilliseconds: delayMilliseconds,
+        reason: reason,
+        restoreReason: restoreReason
+      )
+      return
+    }
+
+    scheduleFixedRestoreInputSource(
+      inputSourceID,
+      delayMilliseconds: delayMilliseconds,
+      reason: reason,
+      restoreReason: restoreReason
+    )
+  }
+
+  private func scheduleFixedRestoreInputSource(
+    _ inputSourceID: String,
+    delayMilliseconds: Int,
+    reason: String,
+    restoreReason: InputSourceRestoreReason
+  ) {
     let workItem = DispatchWorkItem { [weak self] in
       MainActor.assumeIsolated {
         self?.restoreInputSource(inputSourceID, reason: reason)
@@ -586,6 +772,102 @@ final class AppModel: ObservableObject {
       deadline: .now() + .milliseconds(delayMilliseconds),
       execute: workItem
     )
+  }
+
+  private func shouldMonitorVoiceEndRestore(_ restoreReason: InputSourceRestoreReason) -> Bool {
+    switch restoreReason {
+    case .longPressRelease, .secondShortClickRelease:
+      return true
+    case .cancelHandoff:
+      return false
+    }
+  }
+
+  private func scheduleVoiceEndRestoreInputSource(
+    _ inputSourceID: String,
+    initialDelayMilliseconds: Int,
+    reason: String,
+    restoreReason: InputSourceRestoreReason
+  ) {
+    let startedAt = Date()
+    record(
+      .restoration,
+      "voice end restore monitor scheduled, targetInputSourceID=\(inputSourceID), initialDelayMs=\(initialDelayMilliseconds), minimumDelayMs=\(voiceEndRestorePolicy.minimumDelayMilliseconds), maximumDelayMs=\(voiceEndRestorePolicy.maximumDelayMilliseconds), probeElapsedMs=\(voiceEndRestorePolicy.probeElapsedMilliseconds.map(String.init).joined(separator: "/")), restoreReason=\(restoreReason.rawValue), reason=\(reason)"
+    )
+    scheduleVoiceEndRestoreProbe(
+      inputSourceID,
+      reason: reason,
+      restoreReason: restoreReason,
+      startedAt: startedAt,
+      expectedElapsedMilliseconds: 0,
+      delayMilliseconds: 0
+    )
+  }
+
+  private func scheduleVoiceEndRestoreProbe(
+    _ inputSourceID: String,
+    reason: String,
+    restoreReason: InputSourceRestoreReason,
+    startedAt: Date,
+    expectedElapsedMilliseconds: Int,
+    delayMilliseconds: Int
+  ) {
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        self?.runVoiceEndRestoreProbe(
+          inputSourceID,
+          reason: reason,
+          restoreReason: restoreReason,
+          startedAt: startedAt,
+          expectedElapsedMilliseconds: expectedElapsedMilliseconds
+        )
+      }
+    }
+    pendingRestoreWorkItem = workItem
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + .milliseconds(delayMilliseconds),
+      execute: workItem
+    )
+  }
+
+  private func runVoiceEndRestoreProbe(
+    _ inputSourceID: String,
+    reason: String,
+    restoreReason: InputSourceRestoreReason,
+    startedAt: Date,
+    expectedElapsedMilliseconds: Int
+  ) {
+    pendingRestoreWorkItem = nil
+    let actualElapsedMilliseconds = max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
+    let decisionElapsedMilliseconds = max(expectedElapsedMilliseconds, actualElapsedMilliseconds)
+    let isRunningInput = audioInputProbe.isRunningInput()
+    let currentInputSource = inputSourceService.currentInputSource()
+    let decision = voiceEndRestorePolicy.decision(
+      elapsedMilliseconds: decisionElapsedMilliseconds,
+      isRunningInput: isRunningInput
+    )
+    record(
+      .restoration,
+      "voice end restore probe, targetInputSourceID=\(inputSourceID), restoreReason=\(restoreReason.rawValue), expectedElapsedMs=\(expectedElapsedMilliseconds), actualElapsedMs=\(actualElapsedMilliseconds), decisionElapsedMs=\(decisionElapsedMilliseconds), runningInput=\(isRunningInput), currentInputSource=\(currentInputSource), decision=\(decision.logDescription), minimumDelayMs=\(voiceEndRestorePolicy.minimumDelayMilliseconds), maximumDelayMs=\(voiceEndRestorePolicy.maximumDelayMilliseconds), reason=\(reason)"
+    )
+
+    switch decision {
+    case let .restore(restoreTrigger):
+      record(
+        .restoration,
+        "voice end restore proceeding, targetInputSourceID=\(inputSourceID), restoreReason=\(restoreReason.rawValue), restoreTrigger=\(restoreTrigger.rawValue), elapsedMs=\(decisionElapsedMilliseconds), runningInput=\(isRunningInput), reason=\(reason)"
+      )
+      restoreInputSource(inputSourceID, reason: reason)
+    case let .continueProbing(nextProbeElapsedMilliseconds):
+      scheduleVoiceEndRestoreProbe(
+        inputSourceID,
+        reason: reason,
+        restoreReason: restoreReason,
+        startedAt: startedAt,
+        expectedElapsedMilliseconds: nextProbeElapsedMilliseconds,
+        delayMilliseconds: max(0, nextProbeElapsedMilliseconds - decisionElapsedMilliseconds)
+      )
+    }
   }
 
   private func restoreInputSource(_ inputSourceID: String, reason: String) {
@@ -662,4 +944,15 @@ private func defaultLogDirectory() -> URL {
   return base
     .appendingPathComponent("DoubaoVoiceSwitch", isDirectory: true)
     .appendingPathComponent("Logs", isDirectory: true)
+}
+
+private extension VoiceEndRestoreDecision {
+  var logDescription: String {
+    switch self {
+    case let .continueProbing(nextProbeElapsedMilliseconds):
+      return "continueProbing(nextProbeElapsedMs=\(nextProbeElapsedMilliseconds))"
+    case let .restore(reason):
+      return "restore(reason=\(reason.rawValue))"
+    }
+  }
 }
