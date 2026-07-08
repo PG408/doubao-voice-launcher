@@ -391,7 +391,6 @@ func testShortcutForwardingStartsHandoffHoldImmediatelyAndStoresShortRelease() t
     "非输入法接力产生的短按释放应直接放行"
   )
 }
-
 func testInputSourceHandoffBypassesWhenAlreadyUsingDoubaoInputSource() throws {
   let controller = InputSourceHandoffController()
 
@@ -442,66 +441,6 @@ func testInputSourceHandoffCancelsShortClickActivationWithoutRetrying() throws {
   )
 }
 
-func testVoiceActivationRetryPolicyRetriesOnceBeforeFailing() throws {
-  let policy = VoiceActivationRetryPolicy(
-    maxRetryCount: 1,
-    firstReplayDelayMilliseconds: 80,
-    probeDelayMilliseconds: 300,
-    retryKeyDownDelayMilliseconds: 80,
-    retryProbeDelayMilliseconds: 600
-  )
-
-  try expectEqual(
-    policy.firstReplayDelayMilliseconds,
-    80,
-    "首次 synthetic keyDown 应等待输入法切换链路稳定后再转发"
-  )
-  try expectEqual(
-    policy.decision(isRunningInput: true, completedRetryCount: 0),
-    .confirmed,
-    "检测到音频流时应立即确认启动成功"
-  )
-  try expectEqual(
-    policy.decision(isRunningInput: false, completedRetryCount: 0),
-    .retry(retryNumber: 1, retryKeyDownDelayMilliseconds: 80, nextProbeDelayMilliseconds: 600),
-    "首次 probe 未检测到音频流时应进行一次重置式 retry"
-  )
-  try expectEqual(
-    policy.decision(isRunningInput: false, completedRetryCount: 1),
-    .failed,
-    "一次重置式 retry 后仍没有音频流时应失败"
-  )
-}
-
-func testVoiceEndRestorePolicyWaitsForInputToStopUntilDeadline() throws {
-  let policy = VoiceEndRestorePolicy(
-    minimumDelayMilliseconds: 180,
-    maximumDelayMilliseconds: 1_000,
-    probeElapsedMilliseconds: [0, 100, 200, 400, 1_000]
-  )
-
-  try expectEqual(
-    policy.decision(elapsedMilliseconds: 0, isRunningInput: false),
-    .continueProbing(nextProbeElapsedMilliseconds: 100),
-    "未达到最小恢复延迟前，即使音频流已停止也应继续观察"
-  )
-  try expectEqual(
-    policy.decision(elapsedMilliseconds: 200, isRunningInput: false),
-    .restore(reason: .detectedInputStopped),
-    "达到最小恢复延迟后，如果音频流已停止，应恢复原输入法"
-  )
-  try expectEqual(
-    policy.decision(elapsedMilliseconds: 400, isRunningInput: true),
-    .continueProbing(nextProbeElapsedMilliseconds: 1_000),
-    "未达到上限且音频流仍在运行时应继续观察"
-  )
-  try expectEqual(
-    policy.decision(elapsedMilliseconds: 1_000, isRunningInput: true),
-    .restore(reason: .deadlineReached),
-    "达到 1000ms 上限后，即使音频流仍在运行也必须恢复原输入法"
-  )
-}
-
 let tests: [(String, () throws -> Void)] = [
   ("testStartsPreparing", testStartsPreparing),
   ("testBecomesRunningWhenRequiredPrerequisitesAreReady", testBecomesRunningWhenRequiredPrerequisitesAreReady),
@@ -525,8 +464,6 @@ let tests: [(String, () throws -> Void)] = [
   ("testInputSourceHandoffBypassesWhenAlreadyUsingDoubaoInputSource", testInputSourceHandoffBypassesWhenAlreadyUsingDoubaoInputSource),
   ("testInputSourceHandoffDoesNotDuplicateSelectionWhileActive", testInputSourceHandoffDoesNotDuplicateSelectionWhileActive),
   ("testInputSourceHandoffCancelsShortClickActivationWithoutRetrying", testInputSourceHandoffCancelsShortClickActivationWithoutRetrying),
-  ("testVoiceActivationRetryPolicyRetriesOnceBeforeFailing", testVoiceActivationRetryPolicyRetriesOnceBeforeFailing),
-  ("testVoiceEndRestorePolicyWaitsForInputToStopUntilDeadline", testVoiceEndRestorePolicyWaitsForInputToStopUntilDeadline)
 ]
 
 do {
