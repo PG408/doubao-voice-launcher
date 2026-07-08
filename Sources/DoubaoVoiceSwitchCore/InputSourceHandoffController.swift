@@ -52,15 +52,6 @@ public final class InputSourceHandoffController {
     return false
   }
 
-  public var shouldContinueVoiceActivationProbe: Bool {
-    switch state {
-    case .handoffKeyDown, .longPressActive, .shortClickSyntheticHoldActive:
-      return true
-    case .idle, .shortClickSyntheticHoldStopKeyDown:
-      return false
-    }
-  }
-
   public func shouldPassThroughShortcut(currentInputSource: InputSourceIdentity) -> Bool {
     if case .idle = state, currentInputSource == .doubao {
       return true
