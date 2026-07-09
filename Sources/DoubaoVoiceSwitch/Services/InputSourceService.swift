@@ -19,15 +19,8 @@ struct InputSourceService {
     doubaoInputSource() != nil
   }
 
-  func selectDoubaoInputSource() throws {
-    guard let source = doubaoInputSource() else {
-      throw PlatformServiceError.doubaoInputSourceNotFound
-    }
-
-    let status = TISSelectInputSource(source)
-    if status != noErr {
-      throw PlatformServiceError.inputSourceSelectionFailed(status)
-    }
+  func isInputSourceAvailable(id: String) -> Bool {
+    inputSource(withID: id) != nil
   }
 
   func restoreInputSource(id: String) throws {
@@ -77,15 +70,12 @@ struct InputSourceService {
 }
 
 enum PlatformServiceError: Error, CustomStringConvertible {
-  case doubaoInputSourceNotFound
   case inputSourceNotFound(String)
   case inputSourceSelectionFailed(OSStatus)
   case eventDispatchFailed
 
   var description: String {
     switch self {
-    case .doubaoInputSourceNotFound:
-      return "Doubao input source not found"
     case let .inputSourceNotFound(id):
       return "Input source not found: \(id)"
     case let .inputSourceSelectionFailed(status):

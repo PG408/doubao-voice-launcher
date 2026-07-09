@@ -15,25 +15,21 @@ final class AppModel: ObservableObject {
   private let logger: DiagnosticLogger
   private let hotKeyService: GlobalHotKeyService
   private let inputSourceService = InputSourceService()
-  private let handoffController = InputSourceHandoffController()
+  private let audioInputProbe = DoubaoAudioInputProbe()
+  private let restoreController = VoiceInputRestoreController()
   private let forwardingPolicy = ShortcutEventForwardingPolicy()
   private let launchAtLoginService = LaunchAtLoginService()
-  private let toastPresenter = ToastPresenter()
-  private let shortcutSuppressionMilliseconds = 300
-  private let syntheticHoldKeyDownReplayDelayMilliseconds = 30
-  private let nearThresholdLongPressToastMilliseconds = 3_000
-  private let nearThresholdLongPressToastCooldownMilliseconds = 3_000
 
   private var readinessTimer: Timer?
+  private var observationTimer: Timer?
   private var registeredShortcut: DoubaoShortcut?
+  private var pendingInputSourceTimeoutWorkItem: DispatchWorkItem?
+  private var pendingRunningInputTimeoutWorkItem: DispatchWorkItem?
   private var pendingRestoreWorkItem: DispatchWorkItem?
-  private var pendingLongPressWorkItem: DispatchWorkItem?
-  private var shortcutDownDate: Date?
-  private var shortcutSuppressionUntil: Date?
-  private var pendingSuppressedShortcutKeyUps = 0
-  private var shortcutStartedFromInputSourceHandoff = false
-  private var lastNearThresholdLongPressToastDate: Date?
-  private var lastRestorableInputSourceID: String?
+  private var chainStartedAt: Date?
+  private var lastObservedInputSource: InputSourceIdentity?
+  private var lastObservedRunningInput: Bool?
+  private var lastObservedOriginalInputSourceID: String?
   private var lastLoggedStatus: AppStatus?
   private var lastLoggedPrerequisites: [Bool]?
 
@@ -48,13 +44,11 @@ final class AppModel: ObservableObject {
     self.probe = probe
     self.hotKeyService = hotKeyService
     self.logger = logger ?? DiagnosticLogger(logDirectory: defaultLogDirectory(), retentionDays: 7)
-    self.hotKeyService.syntheticHoldKeyDownDelayMilliseconds =
-      syntheticHoldKeyDownReplayDelayMilliseconds
-    loadLongPressThresholdPreference()
     configureHotKeyCallbacks()
     recordLaunchSource()
     refreshReadiness()
     startReadinessPolling()
+    startObservationPolling()
     pruneLogs()
   }
 
@@ -75,7 +69,7 @@ final class AppModel: ObservableObject {
       PrerequisiteItem(
         id: "accessibility",
         title: "辅助功能权限",
-        detail: accessibilityTrusted ? "已开启" : "需要手动授权后才能转发豆包快捷键",
+        detail: accessibilityTrusted ? "已开启" : "需要手动授权后才能观察豆包语音快捷键",
         isReady: accessibilityTrusted,
         actionTitle: accessibilityTrusted ? nil : "请求授权"
       ),
@@ -102,15 +96,15 @@ final class AppModel: ObservableObject {
 
     switch status {
     case .running:
-      lastMessage = "前置条件已满足"
+      lastMessage = "正在监听豆包语音快捷键"
     case .paused:
-      lastMessage = "已暂停响应快捷键"
+      lastMessage = "已暂停监听快捷键"
     case .preparing:
       lastMessage = "仍有前置条件未完成"
     }
 
     if status == .preparing {
-      restoreInputSourceIfNeeded(reason: "preparing")
+      resetObservation(reason: "preparing")
     }
 
     recordReadinessIfChanged()
@@ -118,9 +112,9 @@ final class AppModel: ObservableObject {
   }
 
   func pause() {
-    restoreInputSourceIfNeeded(reason: "pause")
+    resetObservation(reason: "pause")
     readinessState.pause()
-    lastMessage = status == .paused ? "已暂停响应快捷键" : "仍有前置条件未完成"
+    lastMessage = status == .paused ? "已暂停监听快捷键" : "仍有前置条件未完成"
     record(.app, "paused by user")
     updateGlobalShortcutRegistration()
   }
@@ -150,17 +144,6 @@ final class AppModel: ObservableObject {
       hotKeyService.unregister()
       registeredShortcut = nil
     }
-  }
-
-  func updateLongPressThresholdMilliseconds(_ milliseconds: Int) {
-    let clampedMilliseconds = LongPressThresholdPreference.clamped(milliseconds)
-    guard handoffController.longPressThresholdMilliseconds != clampedMilliseconds else {
-      return
-    }
-
-    UserDefaults.standard.set(clampedMilliseconds, forKey: LongPressThresholdPreference.storageKey)
-    handoffController.updateLongPressThresholdMilliseconds(clampedMilliseconds)
-    record(.shortcut, "updated longPress threshold thresholdMs=\(clampedMilliseconds)")
   }
 
   func openAccessibilitySettings() {
@@ -199,10 +182,7 @@ final class AppModel: ObservableObject {
   }
 
   func restoreInputSourceIfNeeded(reason: String) {
-    if hotKeyService.releaseSyntheticHoldIfNeeded() {
-      record(.shortcut, "released synthetic hold, releaseReason=\(reason)")
-    }
-    applyHandoffActions(handoffController.cancelHandoff(), reason: reason)
+    resetObservation(reason: reason)
   }
 
   private func configureHotKeyCallbacks() {
@@ -214,22 +194,14 @@ final class AppModel: ObservableObject {
         self.record(.shortcut, event.message)
       }
     }
-    hotKeyService.onSyntheticHoldKeyDownReplay = { [weak self] event in
-      MainActor.assumeIsolated {
-        guard let self, self.status == .running else {
-          return
-        }
-        self.record(.voiceReadiness, "\(event.message), handoffState=\(self.handoffController.stateDescription)")
-      }
-    }
     hotKeyService.onKeyDown = { [weak self] shortcut in
       MainActor.assumeIsolated {
-        self?.handleGlobalShortcutKeyDown(shortcut: shortcut) ?? .passThrough
+        self?.handleGlobalShortcutKeyDown(shortcut: shortcut)
       }
     }
     hotKeyService.onKeyUp = { [weak self] in
       MainActor.assumeIsolated {
-        self?.handleGlobalShortcutKeyUp() ?? .passThrough
+        self?.handleGlobalShortcutKeyUp()
       }
     }
   }
@@ -266,270 +238,146 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func handleGlobalShortcutKeyDown(shortcut: DoubaoShortcut) -> GlobalHotKeyEventDisposition {
-    guard status == .running else {
-      record(.shortcut, "shortcut ignored while \(status.title)")
-      return .passThrough
-    }
-
-    let now = Date()
-    if isShortcutSuppressionActive(at: now) {
-      pendingSuppressedShortcutKeyUps += 1
-      record(
-        .shortcut,
-        "shortcut ignored by suppression window event=keyDown, shortcut=\(shortcut.displayText), pendingSuppressedKeyUps=\(pendingSuppressedShortcutKeyUps), handoffState=\(handoffController.stateDescription)"
-      )
-      return .suppress
-    }
-
-    pendingRestoreWorkItem?.cancel()
-    pendingRestoreWorkItem = nil
-    pendingLongPressWorkItem?.cancel()
-    pendingLongPressWorkItem = nil
-    shortcutDownDate = now
-    let stateBefore = handoffController.stateDescription
-    let currentInputSource = inputSourceService.currentInputSource()
-    if handoffController.shouldPassThroughShortcut(currentInputSource: currentInputSource) {
-      record(
-        .shortcut,
-        "shortcut passed through because current input source is already Doubao, shortcut=\(shortcut.displayText), handoffState=\(handoffController.stateDescription)"
-      )
-      return .passThrough
-    }
-
-    rememberRestorableInputSource(currentInputSource)
-    let actions = handoffController.shortcutBecameActive(
-      currentInputSource: currentInputSource,
-      fallbackOriginalInputSourceID: lastRestorableInputSourceID
-    )
-    shortcutStartedFromInputSourceHandoff = actions.contains { action in
-      if case .selectDoubaoInputSource = action {
-        return true
-      }
-      return false
-    }
-    let releasePressKind = handoffController.releasePressKind
-    let keyDownForwarding = forwardingPolicy.keyDownForwarding(
-      startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff,
-      releasePressKind: releasePressKind,
-      isSuppressionWindowActive: false
-    )
-    record(
-      .shortcut,
-      "keyDown \(shortcut.displayText), keys=\(shortcut.storageValue), currentInputSource=\(currentInputSource), fallbackOriginalInputSourceID=\(lastRestorableInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffStateAfter=\(handoffController.stateDescription), startedFromInputSourceHandoff=\(shortcutStartedFromInputSourceHandoff), keyDownForwarding=\(keyDownForwarding)"
-    )
-    scheduleLongPressThresholdIfNeeded()
-    applyHandoffActions(actions, reason: "shortcut keyDown")
-    switch keyDownForwarding {
-    case .passThrough:
-      return .passThrough
-    case .startSyntheticHoldKeyDown:
-      record(
-        .voiceReadiness,
-        "synthetic keyDown replay scheduled, replayDelayMs=\(syntheticHoldKeyDownReplayDelayMilliseconds), handoffState=\(handoffController.stateDescription)"
-      )
-      return .startSyntheticHoldKeyDown
-    case .suppress:
-      return .suppress
+  private func startObservationPolling() {
+    observationTimer?.invalidate()
+    observationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+      Task { @MainActor in self?.observeHandoffSignals() }
     }
   }
 
-  private func handleGlobalShortcutKeyUp() -> GlobalHotKeyEventDisposition {
+  private func handleGlobalShortcutKeyDown(shortcut: DoubaoShortcut) {
     guard status == .running else {
-      return .passThrough
-    }
-
-    let now = Date()
-    let releasePressKind = handoffController.releasePressKind
-    let startedFromInputSourceHandoffBeforeRelease = shortcutStartedFromInputSourceHandoff
-    let isSuppressionActive = isShortcutSuppressionActive(at: now)
-    let isPairedWithSuppressedKeyDown = pendingSuppressedShortcutKeyUps > 0
-    if isPairedWithSuppressedKeyDown {
-      pendingSuppressedShortcutKeyUps -= 1
-    }
-    let pressDurationMilliseconds = shortcutDownDate.map {
-      max(0, Int(now.timeIntervalSince($0) * 1000))
-    } ?? 0
-    let keyUpForwarding = forwardingPolicy.keyUpForwarding(
-      startedFromInputSourceHandoff: shortcutStartedFromInputSourceHandoff,
-      releasePressKind: releasePressKind,
-      pressDurationMilliseconds: pressDurationMilliseconds,
-      isSuppressionWindowActive: isSuppressionActive,
-      isPairedWithSuppressedKeyDown: isPairedWithSuppressedKeyDown
-    )
-    if keyUpForwarding == .suppress {
-      record(
-        .shortcut,
-        "shortcut ignored by suppression window event=keyUp, durationMs=\(pressDurationMilliseconds), releasePressKind=\(releasePressKind?.rawValue ?? "none"), pairedWithSuppressedKeyDown=\(isPairedWithSuppressedKeyDown), pendingSuppressedKeyUps=\(pendingSuppressedShortcutKeyUps), handoffState=\(handoffController.stateDescription)"
-      )
-      return .suppress
-    }
-
-    shortcutDownDate = nil
-    pendingLongPressWorkItem?.cancel()
-    pendingLongPressWorkItem = nil
-
-    let pressKind = releasePressKind?.rawValue ?? "none"
-    let stateBefore = handoffController.stateDescription
-    let actions = handoffController.shortcutBecameInactive()
-    shortcutStartedFromInputSourceHandoff = false
-    record(
-      .shortcut,
-      "keyUp \(storedShortcut.displayText), keys=\(storedShortcut.storageValue), durationMs=\(pressDurationMilliseconds), releasePressKind=\(pressKind), handoffStateBefore=\(stateBefore), handoffStateAfter=\(handoffController.stateDescription), keyUpForwarding=\(keyUpForwarding)"
-    )
-    applyHandoffActions(actions, reason: "shortcut keyUp")
-    showNearThresholdLongPressToastIfNeeded(
-      pressDurationMilliseconds: pressDurationMilliseconds,
-      releasePressKind: releasePressKind,
-      startedFromInputSourceHandoff: startedFromInputSourceHandoffBeforeRelease,
-      now: now
-    )
-    switch keyUpForwarding {
-    case .passThrough:
-      return .passThrough
-    case .suppress:
-      return .suppress
-    case .storeSyntheticHoldKeyUp:
-      startShortcutSuppressionWindow(reason: "storeSyntheticHoldKeyUp", now: now)
-      return .storeSyntheticHoldKeyUp
-    case .releaseSyntheticHold:
-      return .releaseSyntheticHold
-    case .forwardSyntheticKeyUp:
-      return .forwardSyntheticKeyUp
-    }
-  }
-
-  private func scheduleLongPressThresholdIfNeeded() {
-    guard handoffController.isAwaitingLongPressThreshold else {
+      record(.shortcut, "shortcut observed while \(status.title), eventDisposition=\(forwardingPolicy.keyDownForwarding())")
       return
     }
 
-    let thresholdMilliseconds = handoffController.longPressThresholdMilliseconds
+    if restoreController.isIdle {
+      cancelPendingWork()
+      chainStartedAt = Date()
+      lastObservedOriginalInputSourceID = nil
+    }
+    let currentInputSource = inputSourceService.currentInputSource()
+    lastObservedInputSource = currentInputSource
+    let runningInput = audioInputProbe.isRunningInput()
+    lastObservedRunningInput = runningInput
+    let stateBefore = restoreController.stateDescription
+    let actions = restoreController.shortcutObserved(
+      currentInputSource: currentInputSource,
+      elapsedMilliseconds: 0
+    )
+    lastObservedOriginalInputSourceID = restoreController.originalInputSourceID
+    isInputSourceHandoffActive = !restoreController.isIdle
+    record(
+      .shortcut,
+      "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=\(forwardingPolicy.keyDownForwarding()), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), runningInput=\(runningInput), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=0"
+    )
+    applyRestoreActions(actions, reason: "shortcutObserved")
+  }
+
+  private func handleGlobalShortcutKeyUp() {
+    record(
+      .shortcut,
+      "shortcut keyUp observed, eventDisposition=\(forwardingPolicy.keyUpForwarding()), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+    )
+  }
+
+  private func observeHandoffSignals() {
+    guard status == .running else {
+      return
+    }
+
+    let currentInputSource = inputSourceService.currentInputSource()
+    if lastObservedInputSource != currentInputSource {
+      lastObservedInputSource = currentInputSource
+      let stateBefore = restoreController.stateDescription
+      let actions = restoreController.currentInputSourceChanged(
+        to: currentInputSource,
+        elapsedMilliseconds: elapsedMilliseconds()
+      )
+      record(
+        .inputSource,
+        "currentInputSource=\(currentInputSource), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+      )
+      applyRestoreActions(actions, reason: "currentInputSourceChanged")
+    }
+
+    let runningInput = audioInputProbe.isRunningInput()
+    if lastObservedRunningInput != runningInput {
+      lastObservedRunningInput = runningInput
+      let stateBefore = restoreController.stateDescription
+      let actions = restoreController.runningInputChanged(
+        isRunningInput: runningInput,
+        currentInputSource: currentInputSource,
+        elapsedMilliseconds: elapsedMilliseconds()
+      )
+      record(
+        .voiceReadiness,
+        "runningInput transition runningInput=\(runningInput), currentInputSource=\(currentInputSource), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+      )
+      applyRestoreActions(actions, reason: "runningInputChanged")
+    }
+  }
+
+  private func scheduleTimeout(
+    reason: VoiceInputRestoreTimeoutReason,
+    delayMilliseconds: Int
+  ) {
     let workItem = DispatchWorkItem { [weak self] in
       MainActor.assumeIsolated {
-        guard let self else {
-          return
-        }
-        self.pendingLongPressWorkItem = nil
-        let stateBefore = self.handoffController.stateDescription
-        let didTrigger = self.handoffController.shortcutLongPressThresholdReached()
-        self.record(
-          .shortcut,
-          "longPressThresholdReached thresholdMs=\(thresholdMilliseconds), triggered=\(didTrigger), syntheticKeyDownAlreadyForwarded=\(self.shortcutStartedFromInputSourceHandoff), handoffStateBefore=\(stateBefore), handoffStateAfter=\(self.handoffController.stateDescription)"
-        )
+        self?.runTimeout(reason: reason)
       }
     }
-    pendingLongPressWorkItem = workItem
+
+    switch reason {
+    case .doubaoInputSource:
+      pendingInputSourceTimeoutWorkItem?.cancel()
+      pendingInputSourceTimeoutWorkItem = workItem
+    case .runningInputStart:
+      pendingRunningInputTimeoutWorkItem?.cancel()
+      pendingRunningInputTimeoutWorkItem = workItem
+    }
+
     DispatchQueue.main.asyncAfter(
-      deadline: .now() + .milliseconds(thresholdMilliseconds),
+      deadline: .now() + .milliseconds(delayMilliseconds),
       execute: workItem
     )
   }
 
-  private func showNearThresholdLongPressToastIfNeeded(
-    pressDurationMilliseconds: Int,
-    releasePressKind: InputSourcePressKind?,
-    startedFromInputSourceHandoff: Bool,
-    now: Date
-  ) {
-    let thresholdMilliseconds = handoffController.longPressThresholdMilliseconds
-    guard releasePressKind == .long,
-          startedFromInputSourceHandoff,
-          LongPressThresholdPreference.isNearThresholdLongPress(
-            pressDurationMilliseconds: pressDurationMilliseconds,
-            thresholdMilliseconds: thresholdMilliseconds
-          )
-    else {
-      return
+  private func runTimeout(reason: VoiceInputRestoreTimeoutReason) {
+    switch reason {
+    case .doubaoInputSource:
+      pendingInputSourceTimeoutWorkItem = nil
+    case .runningInputStart:
+      pendingRunningInputTimeoutWorkItem = nil
     }
 
-    let cooldownSeconds = Double(nearThresholdLongPressToastCooldownMilliseconds) / 1000
-    if let lastDate = lastNearThresholdLongPressToastDate,
-       now.timeIntervalSince(lastDate) < cooldownSeconds {
-      record(
-        .shortcut,
-        "near-threshold long press hint suppressed by cooldown, durationMs=\(pressDurationMilliseconds), thresholdMs=\(thresholdMilliseconds), toleranceMs=\(LongPressThresholdPreference.nearThresholdHintToleranceMilliseconds)"
-      )
-      return
-    }
-
-    lastNearThresholdLongPressToastDate = now
-    toastPresenter.show(
-      message: "本次识别为长按，可以在设置增大长按判断时长",
-      durationMilliseconds: nearThresholdLongPressToastMilliseconds
+    let stateBefore = restoreController.stateDescription
+    let actions = restoreController.timeoutElapsed(
+      reason: reason,
+      elapsedMilliseconds: elapsedMilliseconds()
     )
     record(
-      .shortcut,
-      "near-threshold long press hint shown, durationMs=\(pressDurationMilliseconds), thresholdMs=\(thresholdMilliseconds), toleranceMs=\(LongPressThresholdPreference.nearThresholdHintToleranceMilliseconds)"
+      .restoration,
+      "timeoutReason=\(reason.logValue), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
     )
+    applyRestoreActions(actions, reason: "timeoutElapsed")
   }
 
-  private func isShortcutSuppressionActive(at now: Date) -> Bool {
-    guard let shortcutSuppressionUntil else {
-      return false
-    }
-
-    if now < shortcutSuppressionUntil {
-      return true
-    }
-
-    self.shortcutSuppressionUntil = nil
-    return false
-  }
-
-  private func startShortcutSuppressionWindow(reason: String, now: Date) {
-    shortcutSuppressionUntil = now.addingTimeInterval(Double(shortcutSuppressionMilliseconds) / 1000)
-    record(
-      .shortcut,
-      "started shortcut suppression window durationMs=\(shortcutSuppressionMilliseconds), reason=\(reason)"
-    )
-  }
-
-  private func applyHandoffActions(_ actions: [InputSourceHandoffAction], reason: String) {
-    for action in actions {
-      switch action {
-      case .selectDoubaoInputSource:
-        do {
-          try inputSourceService.selectDoubaoInputSource()
-          isInputSourceHandoffActive = true
-          lastFailureMessage = nil
-          lastMessage = "已切换到豆包输入法"
-          record(
-            .inputSource,
-            "handoff selected Doubao input source, currentInputSourceAfterSelect=\(inputSourceService.currentInputSource()), reason=\(reason)"
-          )
-        } catch {
-          lastFailureMessage = String(describing: error)
-          lastMessage = "切换豆包输入法失败"
-          record(.inputSource, "handoff select Doubao failed: \(error), reason=\(reason)")
-        }
-      case let .scheduleRestoreInputSource(inputSourceID, delayMilliseconds, restoreReason):
-        scheduleRestoreInputSource(
-          inputSourceID,
-          delayMilliseconds: delayMilliseconds,
-          reason: reason,
-          restoreReason: restoreReason
-        )
-      }
-    }
-  }
-
-  private func scheduleRestoreInputSource(
-    _ inputSourceID: String,
+  private func scheduleRestore(
+    originalInputSourceID: String,
     delayMilliseconds: Int,
-    reason: String,
-    restoreReason: InputSourceRestoreReason
+    maximumDelayMilliseconds: Int
   ) {
     pendingRestoreWorkItem?.cancel()
     let workItem = DispatchWorkItem { [weak self] in
       MainActor.assumeIsolated {
-        self?.restoreInputSource(inputSourceID, reason: reason)
+        self?.runRestoreWindow(originalInputSourceID: originalInputSourceID)
       }
     }
     pendingRestoreWorkItem = workItem
     record(
-      .inputSource,
-      "scheduled restore input source \(inputSourceID), delayMs=\(delayMilliseconds), restoreReason=\(restoreReason.rawValue), reason=\(reason)"
+      .restoration,
+      "restoreScheduled originalInputSourceID=\(originalInputSourceID), delayMs=\(delayMilliseconds), maximumDelayMs=\(maximumDelayMilliseconds), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
     )
     DispatchQueue.main.asyncAfter(
       deadline: .now() + .milliseconds(delayMilliseconds),
@@ -537,40 +385,109 @@ final class AppModel: ObservableObject {
     )
   }
 
-  private func restoreInputSource(_ inputSourceID: String, reason: String) {
+  private func runRestoreWindow(originalInputSourceID: String) {
     pendingRestoreWorkItem = nil
+    let currentInputSource = inputSourceService.currentInputSource()
+    let isOriginalAvailable = inputSourceService.isInputSourceAvailable(id: originalInputSourceID)
+    let stateBefore = restoreController.stateDescription
+    let actions = restoreController.restoreWindowElapsed(
+      currentInputSource: currentInputSource,
+      isOriginalInputSourceAvailable: isOriginalAvailable,
+      elapsedMilliseconds: elapsedMilliseconds()
+    )
+    record(
+      .restoration,
+      "restoreWindowElapsed originalInputSourceID=\(originalInputSourceID), originalAvailable=\(isOriginalAvailable), currentInputSource=\(currentInputSource), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+    )
+    applyRestoreActions(actions, reason: "restoreWindowElapsed")
+  }
+
+  private func applyRestoreActions(_ actions: [VoiceInputRestoreAction], reason: String) {
+    for action in actions {
+      switch action {
+      case let .scheduleInputSourceChangeTimeout(delayMilliseconds):
+        scheduleTimeout(reason: .doubaoInputSource, delayMilliseconds: delayMilliseconds)
+      case let .scheduleRunningInputStartTimeout(delayMilliseconds):
+        pendingInputSourceTimeoutWorkItem?.cancel()
+        pendingInputSourceTimeoutWorkItem = nil
+        scheduleTimeout(reason: .runningInputStart, delayMilliseconds: delayMilliseconds)
+      case let .scheduleRestore(originalInputSourceID, delayMilliseconds, maximumDelayMilliseconds):
+        pendingRunningInputTimeoutWorkItem?.cancel()
+        pendingRunningInputTimeoutWorkItem = nil
+        scheduleRestore(
+          originalInputSourceID: originalInputSourceID,
+          delayMilliseconds: delayMilliseconds,
+          maximumDelayMilliseconds: maximumDelayMilliseconds
+        )
+      case let .restoreInputSource(originalInputSourceID):
+        restoreInputSource(originalInputSourceID, reason: reason)
+      case let .skipRestore(skippedReason):
+        let originalInputSourceID = lastObservedOriginalInputSourceID ?? restoreController.originalInputSourceID ?? "none"
+        record(
+          .restoration,
+          "restoreSkippedReason=\(skippedReason.logValue), currentInputSource=\(inputSourceService.currentInputSource()), originalInputSourceID=\(originalInputSourceID), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
+        )
+        clearCompletedObservation()
+      }
+    }
+    isInputSourceHandoffActive = !restoreController.isIdle
+  }
+
+  private func restoreInputSource(_ inputSourceID: String, reason: String) {
     do {
       try inputSourceService.restoreInputSource(id: inputSourceID)
-      lastRestorableInputSourceID = inputSourceID
       isInputSourceHandoffActive = false
       lastFailureMessage = nil
       lastMessage = "已恢复原输入法"
-      record(.inputSource, "restored input source \(inputSourceID), reason=\(reason)")
+      record(
+        .restoration,
+        "restoreCompleted originalInputSourceID=\(inputSourceID), currentInputSource=\(inputSourceService.currentInputSource()), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
+      )
+      clearCompletedObservation()
     } catch {
       isInputSourceHandoffActive = false
       lastFailureMessage = String(describing: error)
       lastMessage = "恢复原输入法失败"
-      record(.inputSource, "restore input source failed: \(error), id=\(inputSourceID), reason=\(reason)")
+      record(
+        .restoration,
+        "restoreSkippedReason=restoreFailed, originalInputSourceID=\(inputSourceID), error=\(error), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
+      )
+      clearCompletedObservation()
     }
+  }
+
+  private func resetObservation(reason: String) {
+    cancelPendingWork()
+    restoreController.reset()
+    clearCompletedObservation()
+    isInputSourceHandoffActive = false
+    record(.restoration, "restoreSkippedReason=reset, reason=\(reason), elapsedMs=\(elapsedMilliseconds())")
+  }
+
+  private func cancelPendingWork() {
+    pendingInputSourceTimeoutWorkItem?.cancel()
+    pendingInputSourceTimeoutWorkItem = nil
+    pendingRunningInputTimeoutWorkItem?.cancel()
+    pendingRunningInputTimeoutWorkItem = nil
+    pendingRestoreWorkItem?.cancel()
+    pendingRestoreWorkItem = nil
+  }
+
+  private func clearCompletedObservation() {
+    chainStartedAt = nil
+    lastObservedRunningInput = nil
+    lastObservedOriginalInputSourceID = nil
   }
 
   private var storedShortcut: DoubaoShortcut {
     DoubaoShortcut(storageValue: UserDefaults.standard.string(forKey: "doubaoShortcutKeys"))
   }
 
-  private func loadLongPressThresholdPreference() {
-    let storedMilliseconds = UserDefaults.standard.object(forKey: LongPressThresholdPreference.storageKey) as? Int
-      ?? LongPressThresholdPreference.defaultMilliseconds
-    let clampedMilliseconds = LongPressThresholdPreference.clamped(storedMilliseconds)
-    UserDefaults.standard.set(clampedMilliseconds, forKey: LongPressThresholdPreference.storageKey)
-    handoffController.updateLongPressThresholdMilliseconds(clampedMilliseconds)
-  }
-
-  private func rememberRestorableInputSource(_ inputSource: InputSourceIdentity) {
-    guard let inputSourceID = inputSource.restorationID, !inputSourceID.isEmpty else {
-      return
+  private func elapsedMilliseconds() -> Int {
+    guard let chainStartedAt else {
+      return 0
     }
-    lastRestorableInputSourceID = inputSourceID
+    return max(0, Int(Date().timeIntervalSince(chainStartedAt) * 1000))
   }
 
   private func pruneLogs() {
@@ -611,4 +528,32 @@ private func defaultLogDirectory() -> URL {
   return base
     .appendingPathComponent("DoubaoVoiceSwitch", isDirectory: true)
     .appendingPathComponent("Logs", isDirectory: true)
+}
+
+private extension VoiceInputRestoreTimeoutReason {
+  var logValue: String {
+    switch self {
+    case .doubaoInputSource:
+      return "doubaoInputSource"
+    case .runningInputStart:
+      return "runningInputStart"
+    }
+  }
+}
+
+private extension VoiceInputRestoreSkippedReason {
+  var logValue: String {
+    switch self {
+    case .shortcutStartedFromDoubao:
+      return "shortcutStartedFromDoubao"
+    case .originalInputSourceUnavailable:
+      return "originalInputSourceUnavailable"
+    case .currentInputSourceChangedBeforeRestore:
+      return "currentInputSourceChangedBeforeRestore"
+    case .doubaoInputSourceTimedOut:
+      return "doubaoInputSourceTimedOut"
+    case .runningInputStartTimedOut:
+      return "runningInputStartTimedOut"
+    }
+  }
 }

@@ -5,7 +5,6 @@ struct SettingsView: View {
   @ObservedObject var model: AppModel
 
   @AppStorage("doubaoShortcutKeys") private var doubaoShortcutKeys = DoubaoShortcut(keys: DoubaoShortcut.defaultKeys).storageValue
-  @AppStorage(LongPressThresholdPreference.storageKey) private var longPressThresholdMilliseconds = LongPressThresholdPreference.defaultMilliseconds
   @AppStorage("launchAtLogin") private var launchAtLogin = false
 
   var body: some View {
@@ -20,15 +19,11 @@ struct SettingsView: View {
     .onChange(of: doubaoShortcutKeys) {
       model.updateGlobalShortcutRegistration()
     }
-    .onChange(of: longPressThresholdMilliseconds) {
-      normalizeLongPressThreshold()
-    }
     .onChange(of: launchAtLogin) {
       model.setLaunchAtLogin(launchAtLogin)
     }
     .onAppear {
       launchAtLogin = model.isLaunchAtLoginEnabled()
-      normalizeLongPressThreshold()
     }
   }
 
@@ -47,6 +42,7 @@ struct SettingsView: View {
         Text(commandHeaderMessage)
           .font(.subheadline)
           .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
       }
 
       Spacer()
@@ -90,27 +86,9 @@ struct SettingsView: View {
         ControlRow(
           systemImage: "keyboard",
           title: "快捷键",
-          detail: "与豆包输入法保持一致"
+          detail: "与豆包输入法的语音快捷键保持一致"
         ) {
           DoubaoShortcutPickerView(storageValue: $doubaoShortcutKeys)
-        }
-
-        Divider()
-
-        ControlRow(
-          systemImage: "timer",
-          title: "长按判定",
-          detail: "时间越短响应越快；时间越长越不容易误判"
-        ) {
-          Stepper(
-            value: $longPressThresholdMilliseconds,
-            in: LongPressThresholdPreference.minimumMilliseconds...LongPressThresholdPreference.maximumMilliseconds,
-            step: 10
-          ) {
-            Text("\(longPressThresholdMilliseconds) ms")
-              .monospacedDigit()
-              .frame(width: 64, alignment: .trailing)
-          }
         }
 
         Divider()
@@ -156,20 +134,12 @@ struct SettingsView: View {
 
   private var commandHeaderMessage: String {
     if needsAccessibilityAuthorization {
-      return "需要辅助功能权限后才能转发快捷键"
+      return "需要辅助功能权限后才能观察豆包语音快捷键"
     }
     if model.status == .paused {
-      return "已暂停响应豆包语音快捷键"
+      return "已暂停监听豆包语音快捷键"
     }
-    return "长按或点按快捷键即可使用豆包语音输入"
-  }
-
-  private func normalizeLongPressThreshold() {
-    let clampedMilliseconds = LongPressThresholdPreference.clamped(longPressThresholdMilliseconds)
-    if clampedMilliseconds != longPressThresholdMilliseconds {
-      longPressThresholdMilliseconds = clampedMilliseconds
-    }
-    model.updateLongPressThresholdMilliseconds(clampedMilliseconds)
+    return "监听豆包语音快捷键，语音结束后恢复原输入法。本软件不触发语音输入。"
   }
 }
 
