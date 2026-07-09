@@ -139,7 +139,7 @@ struct SettingsView: View {
     if model.status == .paused {
       return "已暂停监听豆包语音快捷键"
     }
-    return "监听豆包语音快捷键，语音结束后恢复原输入法。本软件不触发语音输入。"
+    return "监听豆包语音快捷键，语音结束后恢复原输入法。"
   }
 }
 
