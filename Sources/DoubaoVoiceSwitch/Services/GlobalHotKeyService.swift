@@ -3,15 +3,12 @@ import DoubaoVoiceSwitchCore
 import Foundation
 
 final class GlobalHotKeyService {
-  var onKeyDown: ((DoubaoShortcut) -> Void)?
-  var onKeyUp: (() -> Void)?
-  var onShortcutEventObserved: ((GlobalHotKeyEventLog) -> Void)?
+  var onShortcutObserved: ((DoubaoShortcut) -> Void)?
 
   private var eventTap: CFMachPort?
   private var runLoopSource: CFRunLoopSource?
   private var shortcut: DoubaoShortcut?
-  private var isShortcutDown = false
-  private var activeKeys: Set<DoubaoShortcutKey> = []
+  private var shortcutObserver: ShortcutPressObserver?
 
   deinit {
     unregister()
@@ -20,6 +17,7 @@ final class GlobalHotKeyService {
   func register(shortcut: DoubaoShortcut) throws {
     unregister()
     self.shortcut = shortcut
+    shortcutObserver = ShortcutPressObserver(shortcut: shortcut)
 
     let mask = 1 << CGEventType.flagsChanged.rawValue
     guard let eventTap = CGEvent.tapCreate(
@@ -61,8 +59,7 @@ final class GlobalHotKeyService {
     }
 
     shortcut = nil
-    isShortcutDown = false
-    activeKeys = []
+    shortcutObserver = nil
   }
 
   private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -70,57 +67,29 @@ final class GlobalHotKeyService {
       return Unmanaged.passUnretained(event)
     }
 
-    guard let shortcut else {
+    guard let shortcut, var shortcutObserver else {
       return Unmanaged.passUnretained(event)
     }
 
-    guard DoubaoShortcutKey.key(forKeyCode: event.keyCode) != nil else {
+    guard let key = DoubaoShortcutKey.key(forKeyCode: event.keyCode),
+          shortcut.keys.contains(key) else {
       return Unmanaged.passUnretained(event)
     }
 
-    updateActiveKeys(event: event)
-    let isActiveShortcut = shortcut.matches(activeKeys: activeKeys)
-    onShortcutEventObserved?(event.logEvent(
-      type: type,
-      activeKeys: activeKeys,
-      isActiveShortcut: isActiveShortcut,
-      isShortcutDown: isShortcutDown
-    ))
-
-    if isActiveShortcut, !isShortcutDown {
-      isShortcutDown = true
-      onKeyDown?(shortcut)
-    } else if isShortcutDown, !isActiveShortcut {
-      isShortcutDown = false
-      onKeyUp?()
+    let shortcutObserved = shortcutObserver.observe(
+      key: key,
+      activeModifiers: ShortcutModifiers(event.flags),
+      isFunctionActive: event.flags.contains(.maskSecondaryFn)
+    )
+    self.shortcutObserver = shortcutObserver
+    if shortcutObserved {
+      let callback = onShortcutObserved
+      DispatchQueue.main.async {
+        callback?(shortcut)
+      }
     }
 
     return Unmanaged.passUnretained(event)
-  }
-
-  private func updateActiveKeys(event: CGEvent) {
-    guard let key = DoubaoShortcutKey.key(forKeyCode: event.keyCode) else {
-      return
-    }
-
-    if key == .function {
-      updateActiveKey(key, isActive: event.flags.contains(.maskSecondaryFn))
-      return
-    }
-
-    if activeKeys.contains(key) {
-      activeKeys.remove(key)
-    } else if let modifier = key.modifier, ShortcutModifiers(event.flags).contains(modifier) {
-      activeKeys.insert(key)
-    }
-  }
-
-  private func updateActiveKey(_ key: DoubaoShortcutKey, isActive: Bool) {
-    if isActive {
-      activeKeys.insert(key)
-    } else {
-      activeKeys.remove(key)
-    }
   }
 }
 
@@ -149,58 +118,5 @@ enum GlobalHotKeyError: Error, CustomStringConvertible {
     case .eventTapInstallFailed:
       return "Global shortcut event tap install failed. Manually grant Accessibility permission to Doubao Voice Switch."
     }
-  }
-}
-
-struct GlobalHotKeyEventLog {
-  let type: CGEventType
-  let keyCode: UInt16
-  let flags: UInt64
-  let activeKeys: Set<DoubaoShortcutKey>
-  let isActiveShortcut: Bool
-  let isShortcutDown: Bool
-  let eventSourceUserData: Int64
-  let eventSourceUnixProcessID: Int64
-  let eventSourceStateID: Int64
-
-  var message: String {
-    let sortedKeys = activeKeys
-      .map(\.rawValue)
-      .sorted()
-      .joined(separator: "+")
-    return [
-      "observed shortcut event type=\(type.rawValue)",
-      "keyCode=\(keyCode)",
-      "flags=0x\(String(flags, radix: 16))",
-      "activeKeys=\(sortedKeys.isEmpty ? "none" : sortedKeys)",
-      "isActiveShortcut=\(isActiveShortcut)",
-      "isShortcutDown=\(isShortcutDown)",
-      "eventDisposition=passThrough",
-      "eventTapLocation=hidListenOnly",
-      "eventSourceUserData=\(eventSourceUserData)",
-      "eventSourceUnixProcessID=\(eventSourceUnixProcessID)",
-      "eventSourceStateID=\(eventSourceStateID)"
-    ].joined(separator: ", ")
-  }
-}
-
-private extension CGEvent {
-  func logEvent(
-    type: CGEventType,
-    activeKeys: Set<DoubaoShortcutKey>,
-    isActiveShortcut: Bool,
-    isShortcutDown: Bool
-  ) -> GlobalHotKeyEventLog {
-    GlobalHotKeyEventLog(
-      type: type,
-      keyCode: keyCode,
-      flags: UInt64(flags.rawValue),
-      activeKeys: activeKeys,
-      isActiveShortcut: isActiveShortcut,
-      isShortcutDown: isShortcutDown,
-      eventSourceUserData: getIntegerValueField(.eventSourceUserData),
-      eventSourceUnixProcessID: getIntegerValueField(.eventSourceUnixProcessID),
-      eventSourceStateID: getIntegerValueField(.eventSourceStateID)
-    )
   }
 }

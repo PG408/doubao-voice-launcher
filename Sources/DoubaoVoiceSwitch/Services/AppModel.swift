@@ -186,22 +186,9 @@ final class AppModel: ObservableObject {
   }
 
   private func configureHotKeyCallbacks() {
-    hotKeyService.onShortcutEventObserved = { [weak self] event in
+    hotKeyService.onShortcutObserved = { [weak self] shortcut in
       MainActor.assumeIsolated {
-        guard let self, self.status == .running else {
-          return
-        }
-        self.record(.shortcut, event.message)
-      }
-    }
-    hotKeyService.onKeyDown = { [weak self] shortcut in
-      MainActor.assumeIsolated {
-        self?.handleGlobalShortcutKeyDown(shortcut: shortcut)
-      }
-    }
-    hotKeyService.onKeyUp = { [weak self] in
-      MainActor.assumeIsolated {
-        self?.handleGlobalShortcutKeyUp()
+        self?.handleGlobalShortcutObserved(shortcut: shortcut)
       }
     }
   }
@@ -245,21 +232,17 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func handleGlobalShortcutKeyDown(shortcut: DoubaoShortcut) {
-    guard status == .running else {
-      record(.shortcut, "shortcut observed while \(status.title), eventDisposition=\(forwardingPolicy.keyDownForwarding())")
+  private func handleGlobalShortcutObserved(shortcut: DoubaoShortcut) {
+    guard status == .running, restoreController.isIdle else {
       return
     }
 
-    if restoreController.isIdle {
-      cancelPendingWork()
-      chainStartedAt = Date()
-      lastObservedOriginalInputSourceID = nil
-    }
-    let currentInputSource = inputSourceService.currentInputSource()
+    cancelPendingWork()
+    chainStartedAt = Date()
+    lastObservedOriginalInputSourceID = nil
+    let currentInputSource = lastObservedInputSource ?? inputSourceService.currentInputSource()
     lastObservedInputSource = currentInputSource
-    let runningInput = audioInputProbe.isRunningInput()
-    lastObservedRunningInput = runningInput
+    lastObservedRunningInput = nil
     let stateBefore = restoreController.stateDescription
     let actions = restoreController.shortcutObserved(
       currentInputSource: currentInputSource,
@@ -269,16 +252,9 @@ final class AppModel: ObservableObject {
     isInputSourceHandoffActive = !restoreController.isIdle
     record(
       .shortcut,
-      "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=\(forwardingPolicy.keyDownForwarding()), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), runningInput=\(runningInput), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=0"
+      "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=\(forwardingPolicy.keyDownForwarding()), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=0"
     )
     applyRestoreActions(actions, reason: "shortcutObserved")
-  }
-
-  private func handleGlobalShortcutKeyUp() {
-    record(
-      .shortcut,
-      "shortcut keyUp observed, eventDisposition=\(forwardingPolicy.keyUpForwarding()), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
-    )
   }
 
   private func observeHandoffSignals() {
@@ -294,11 +270,22 @@ final class AppModel: ObservableObject {
         to: currentInputSource,
         elapsedMilliseconds: elapsedMilliseconds()
       )
+      let transientInputSource = stateBefore == "waitingForRunningInput"
+        && restoreController.stateDescription == "waitingForRunningInput"
+        && currentInputSource != .doubao
+        ? ", transientInputSource=\(currentInputSource)"
+        : ""
       record(
         .inputSource,
-        "currentInputSource=\(currentInputSource), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+        "currentInputSource=\(currentInputSource), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription)\(transientInputSource), elapsedMs=\(elapsedMilliseconds())"
       )
       applyRestoreActions(actions, reason: "currentInputSourceChanged")
+    }
+
+    guard restoreController.shouldObserveRunningInput,
+          currentInputSource == .doubao else {
+      lastObservedRunningInput = nil
+      return
     }
 
     let runningInput = audioInputProbe.isRunningInput()
@@ -419,9 +406,13 @@ final class AppModel: ObservableObject {
           delayMilliseconds: delayMilliseconds,
           maximumDelayMilliseconds: maximumDelayMilliseconds
         )
+      case .cancelRunningInputStartTimeout:
+        pendingRunningInputTimeoutWorkItem?.cancel()
+        pendingRunningInputTimeoutWorkItem = nil
       case let .restoreInputSource(originalInputSourceID):
         restoreInputSource(originalInputSourceID, reason: reason)
       case let .skipRestore(skippedReason):
+        cancelPendingWork()
         let originalInputSourceID = lastObservedOriginalInputSourceID ?? restoreController.originalInputSourceID ?? "none"
         record(
           .restoration,
@@ -436,12 +427,14 @@ final class AppModel: ObservableObject {
   private func restoreInputSource(_ inputSourceID: String, reason: String) {
     do {
       try inputSourceService.restoreInputSource(id: inputSourceID)
+      let currentInputSource = inputSourceService.currentInputSource()
+      lastObservedInputSource = currentInputSource
       isInputSourceHandoffActive = false
       lastFailureMessage = nil
       lastMessage = "已恢复原输入法"
       record(
         .restoration,
-        "restoreCompleted originalInputSourceID=\(inputSourceID), currentInputSource=\(inputSourceService.currentInputSource()), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
+        "restoreCompleted originalInputSourceID=\(inputSourceID), currentInputSource=\(currentInputSource), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
       )
       clearCompletedObservation()
     } catch {

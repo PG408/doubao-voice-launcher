@@ -41,6 +41,7 @@ public enum VoiceInputRestoreAction: Equatable, Sendable {
     delayMilliseconds: Int,
     maximumDelayMilliseconds: Int
   )
+  case cancelRunningInputStartTimeout
   case restoreInputSource(originalInputSourceID: String)
   case skipRestore(reason: VoiceInputRestoreSkippedReason)
 }
@@ -62,6 +63,15 @@ public final class VoiceInputRestoreController {
       return true
     }
     return false
+  }
+
+  public var shouldObserveRunningInput: Bool {
+    switch state {
+    case .waitingForRunningInput, .voiceActive, .restoring:
+      return true
+    case .idle, .waitingForDoubao:
+      return false
+    }
   }
 
   public var originalInputSourceID: String? {
@@ -121,7 +131,9 @@ public final class VoiceInputRestoreController {
           delayMilliseconds: configuration.runningInputStartTimeoutMilliseconds
         )
       ]
-    case .waitingForRunningInput, .voiceActive, .restoring:
+    case .waitingForRunningInput:
+      return []
+    case .voiceActive, .restoring:
       guard currentInputSource != .doubao else {
         return []
       }
@@ -142,8 +154,7 @@ public final class VoiceInputRestoreController {
       doubaoSelectedElapsedMilliseconds
     ):
       guard currentInputSource == .doubao else {
-        state = .idle
-        return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
+        return []
       }
       guard isRunningInput else {
         return []
@@ -154,7 +165,7 @@ public final class VoiceInputRestoreController {
         doubaoSelectedElapsedMilliseconds: doubaoSelectedElapsedMilliseconds,
         runningInputStartedElapsedMilliseconds: max(0, elapsedMilliseconds)
       )
-      return []
+      return [.cancelRunningInputStartTimeout]
     case let .voiceActive(
       originalInputSourceID,
       observedElapsedMilliseconds,

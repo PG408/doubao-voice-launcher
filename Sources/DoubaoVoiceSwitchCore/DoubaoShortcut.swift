@@ -105,6 +105,14 @@ public struct DoubaoShortcut: Codable, Equatable, Sendable {
     keys.map(\.displayText).joined(separator: " + ")
   }
 
+  public var modifiers: ShortcutModifiers {
+    keys.reduce(into: ShortcutModifiers()) { modifiers, key in
+      if let modifier = key.modifier {
+        modifiers.insert(modifier)
+      }
+    }
+  }
+
   public func matches(activeKeys: Set<DoubaoShortcutKey>) -> Bool {
     Set(keys) == activeKeys
   }
