@@ -10,14 +10,6 @@ extension AppStatus {
     }
   }
 
-  var systemImage: String {
-    switch self {
-    case .running: return "mic.circle"
-    case .paused: return "pause.circle"
-    case .preparing: return "exclamationmark.circle"
-    }
-  }
-
   var tint: Color {
     switch self {
     case .running: return .green

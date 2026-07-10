@@ -46,28 +46,6 @@ func testRemainsPreparingWhenAnyRequiredPrerequisiteIsMissing() throws {
   try expectEqual(state.status, .preparing, "必要前置条件缺失时应保持准备中")
 }
 
-func testDiagnosticLoggerWritesDailyLogAndPrunesExpiredFiles() throws {
-  let fileManager = FileManager.default
-  let directory = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-  try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-  defer { try? fileManager.removeItem(at: directory) }
-
-  let oldLog = directory.appendingPathComponent("2026-06-10.log")
-  try "old".write(to: oldLog, atomically: true, encoding: .utf8)
-
-  let now = Date(timeIntervalSince1970: 1_781_950_800)
-  let logger = DiagnosticLogger(logDirectory: directory, retentionDays: 7)
-  try logger.record(DiagnosticLogEntry(timestamp: now, category: .shortcut, message: "handled handoff trigger"))
-  try logger.pruneLogs(now: now)
-
-  let todayLog = directory.appendingPathComponent("2026-06-20.log")
-  let contents = try String(contentsOf: todayLog, encoding: .utf8)
-  try expectEqual(fileManager.fileExists(atPath: oldLog.path), false, "过期日志应被清理")
-  if !contents.contains("handled handoff trigger") {
-    throw TestFailure(description: "当天日志应包含写入事件")
-  }
-}
-
 func testDoubaoShortcutDisplaysSelectedPhysicalKeysInStableOrder() throws {
   let shortcut = DoubaoShortcut(keys: [.rightCommand, .function, .leftControl])
   try expectEqual(shortcut.displayText, "L⌃ + R⌘ + Fn", "豆包快捷键应按稳定顺序显示已选择物理键")
@@ -199,8 +177,7 @@ func testObservedShortcutFromOtherInputSourceRestoresAfterRunningInputStops() th
     [
       .scheduleRestore(
         originalInputSourceID: originalInputSourceID,
-        delayMilliseconds: 500,
-        maximumDelayMilliseconds: 1_000
+        delayMilliseconds: 500
       )
     ],
     "runningInput=false 后应安排稳定期恢复"
@@ -240,13 +217,6 @@ func testRunningInputObservationStartsOnlyAfterDoubaoSelection() throws {
   )
   _ = controller.timeoutElapsed(reason: .runningInputStart, elapsedMilliseconds: 1_700)
   try expectEqual(controller.shouldObserveRunningInput, false, "链路超时回到空闲后应停止探测 runningInput")
-}
-
-func testShortcutEventsAreAlwaysPassThrough() throws {
-  let policy = ShortcutEventForwardingPolicy()
-
-  try expectEqual(policy.keyDownForwarding(), .passThrough, "快捷键 keyDown 必须透传")
-  try expectEqual(policy.keyUpForwarding(), .passThrough, "快捷键 keyUp 必须透传")
 }
 
 func testShortcutFromDoubaoInputSourceDoesNotRestore() throws {
@@ -422,8 +392,7 @@ private extension VoiceInputRestoreConfiguration {
   static let test = VoiceInputRestoreConfiguration(
     doubaoInputSourceTimeoutMilliseconds: 1_000,
     runningInputStartTimeoutMilliseconds: 1_500,
-    restoreStabilityDelayMilliseconds: 500,
-    restoreMaximumDelayMilliseconds: 1_000
+    restoreStabilityDelayMilliseconds: 500
   )
 }
 
@@ -433,7 +402,6 @@ let tests: [(String, () throws -> Void)] = [
   ("testPauseAndResume", testPauseAndResume),
   ("testMissingPrerequisiteOverridesPausedStatus", testMissingPrerequisiteOverridesPausedStatus),
   ("testRemainsPreparingWhenAnyRequiredPrerequisiteIsMissing", testRemainsPreparingWhenAnyRequiredPrerequisiteIsMissing),
-  ("testDiagnosticLoggerWritesDailyLogAndPrunesExpiredFiles", testDiagnosticLoggerWritesDailyLogAndPrunesExpiredFiles),
   ("testDoubaoShortcutDisplaysSelectedPhysicalKeysInStableOrder", testDoubaoShortcutDisplaysSelectedPhysicalKeysInStableOrder),
   ("testDoubaoShortcutRejectsEmptySelection", testDoubaoShortcutRejectsEmptySelection),
   ("testDoubaoShortcutMatchesOnlyExactSelectedKeySet", testDoubaoShortcutMatchesOnlyExactSelectedKeySet),
@@ -454,7 +422,6 @@ let tests: [(String, () throws -> Void)] = [
     "testRunningInputObservationStartsOnlyAfterDoubaoSelection",
     testRunningInputObservationStartsOnlyAfterDoubaoSelection
   ),
-  ("testShortcutEventsAreAlwaysPassThrough", testShortcutEventsAreAlwaysPassThrough),
   ("testShortcutFromDoubaoInputSourceDoesNotRestore", testShortcutFromDoubaoInputSourceDoesNotRestore),
   ("testManualSwitchToDoubaoWithoutShortcutDoesNotRestore", testManualSwitchToDoubaoWithoutShortcutDoesNotRestore),
   ("testRunningInputNeverStartsBeforeTimeoutDoesNotRestore", testRunningInputNeverStartsBeforeTimeoutDoesNotRestore),

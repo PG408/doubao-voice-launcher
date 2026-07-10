@@ -1,6 +1,6 @@
 import Foundation
 
-public enum DiagnosticLogCategory: String, Equatable {
+enum DiagnosticLogCategory: String, Equatable {
   case app
   case shortcut
   case inputSource
@@ -8,26 +8,20 @@ public enum DiagnosticLogCategory: String, Equatable {
   case restoration
 }
 
-public struct DiagnosticLogEntry: Equatable {
-  public let timestamp: Date
-  public let category: DiagnosticLogCategory
-  public let message: String
-
-  public init(timestamp: Date, category: DiagnosticLogCategory, message: String) {
-    self.timestamp = timestamp
-    self.category = category
-    self.message = message
-  }
+struct DiagnosticLogEntry: Equatable {
+  let timestamp: Date
+  let category: DiagnosticLogCategory
+  let message: String
 }
 
-public struct DiagnosticLogger {
-  public let logDirectory: URL
-  public let retentionDays: Int
+struct DiagnosticLogger {
+  let logDirectory: URL
+  let retentionDays: Int
 
   private let fileManager: FileManager
   private let calendar: Calendar
 
-  public init(logDirectory: URL, retentionDays: Int, fileManager: FileManager = .default) {
+  init(logDirectory: URL, retentionDays: Int, fileManager: FileManager = .default) {
     self.logDirectory = logDirectory
     self.retentionDays = retentionDays
     self.fileManager = fileManager
@@ -37,7 +31,7 @@ public struct DiagnosticLogger {
     self.calendar = calendar
   }
 
-  public func record(_ entry: DiagnosticLogEntry) throws {
+  func record(_ entry: DiagnosticLogEntry) throws {
     try fileManager.createDirectory(at: logDirectory, withIntermediateDirectories: true)
 
     let line = "\(Self.timestampFormatter.string(from: entry.timestamp)) [\(entry.category.rawValue)] \(entry.message)\n"
@@ -54,7 +48,7 @@ public struct DiagnosticLogger {
     }
   }
 
-  public func pruneLogs(now: Date = Date()) throws {
+  func pruneLogs(now: Date = Date()) throws {
     guard fileManager.fileExists(atPath: logDirectory.path) else {
       return
     }

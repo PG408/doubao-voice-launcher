@@ -72,7 +72,6 @@ struct InputSourceService {
 enum PlatformServiceError: Error, CustomStringConvertible {
   case inputSourceNotFound(String)
   case inputSourceSelectionFailed(OSStatus)
-  case eventDispatchFailed
 
   var description: String {
     switch self {
@@ -80,8 +79,6 @@ enum PlatformServiceError: Error, CustomStringConvertible {
       return "Input source not found: \(id)"
     case let .inputSourceSelectionFailed(status):
       return "Input source selection failed: \(status)"
-    case .eventDispatchFailed:
-      return "Keyboard event dispatch failed"
     }
   }
 }

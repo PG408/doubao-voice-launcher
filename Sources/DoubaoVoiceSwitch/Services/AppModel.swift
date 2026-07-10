@@ -7,8 +7,6 @@ final class AppModel: ObservableObject {
   static let shared = AppModel()
 
   @Published private(set) var readinessState = AppReadinessState()
-  @Published private(set) var lastMessage = "正在检查前置条件"
-  @Published private(set) var isInputSourceHandoffActive = false
   @Published private(set) var lastFailureMessage: String?
 
   private let probe: PlatformReadinessProbe
@@ -17,7 +15,6 @@ final class AppModel: ObservableObject {
   private let inputSourceService = InputSourceService()
   private let audioInputProbe = DoubaoAudioInputProbe()
   private let restoreController = VoiceInputRestoreController()
-  private let forwardingPolicy = ShortcutEventForwardingPolicy()
   private let launchAtLoginService = LaunchAtLoginService()
 
   private var readinessTimer: Timer?
@@ -60,10 +57,6 @@ final class AppModel: ObservableObject {
     status.title
   }
 
-  var statusSystemImage: String {
-    status.systemImage
-  }
-
   var prerequisites: [PrerequisiteItem] {
     [
       PrerequisiteItem(
@@ -94,16 +87,7 @@ final class AppModel: ObservableObject {
     readinessState.setAccessibilityTrusted(accessibilityTrusted)
     readinessState.setDoubaoInputSourceAvailable(doubaoInputSourceAvailable)
 
-    switch status {
-    case .running:
-      lastMessage = "正在监听豆包语音快捷键"
-    case .paused:
-      lastMessage = "已暂停监听快捷键"
-    case .preparing:
-      lastMessage = "仍有前置条件未完成"
-    }
-
-    if status == .preparing {
+    if status == .preparing, !restoreController.isIdle {
       resetObservation(reason: "preparing")
     }
 
@@ -114,7 +98,6 @@ final class AppModel: ObservableObject {
   func pause() {
     resetObservation(reason: "pause")
     readinessState.pause()
-    lastMessage = status == .paused ? "已暂停监听快捷键" : "仍有前置条件未完成"
     record(.app, "paused by user")
     updateGlobalShortcutRegistration()
   }
@@ -126,23 +109,24 @@ final class AppModel: ObservableObject {
   }
 
   func updateGlobalShortcutRegistration() {
-    if status == .running || status == .paused {
-      guard registeredShortcut != storedShortcut else {
-        return
-      }
-      do {
-        try hotKeyService.register(shortcut: storedShortcut)
-        registeredShortcut = storedShortcut
-        lastFailureMessage = nil
-        record(.shortcut, "registered shortcut \(storedShortcut.displayText)")
-      } catch {
-        registeredShortcut = nil
-        lastFailureMessage = String(describing: error)
-        record(.shortcut, "shortcut registration failed: \(error)")
-      }
-    } else {
+    guard status == .running else {
       hotKeyService.unregister()
       registeredShortcut = nil
+      return
+    }
+
+    guard registeredShortcut != storedShortcut else {
+      return
+    }
+    do {
+      try hotKeyService.register(shortcut: storedShortcut)
+      registeredShortcut = storedShortcut
+      lastFailureMessage = nil
+      record(.shortcut, "registered shortcut \(storedShortcut.displayText)")
+    } catch {
+      registeredShortcut = nil
+      lastFailureMessage = String(describing: error)
+      record(.shortcut, "shortcut registration failed: \(error)")
     }
   }
 
@@ -164,7 +148,6 @@ final class AppModel: ObservableObject {
 
   func clearLogs() {
     try? FileManager.default.removeItem(at: logDirectory)
-    lastMessage = "日志已清空"
   }
 
   func setLaunchAtLogin(_ isEnabled: Bool) {
@@ -179,10 +162,6 @@ final class AppModel: ObservableObject {
 
   func isLaunchAtLoginEnabled() -> Bool {
     launchAtLoginService.isEnabled()
-  }
-
-  func restoreInputSourceIfNeeded(reason: String) {
-    resetObservation(reason: reason)
   }
 
   private func configureHotKeyCallbacks() {
@@ -249,10 +228,9 @@ final class AppModel: ObservableObject {
       elapsedMilliseconds: 0
     )
     lastObservedOriginalInputSourceID = restoreController.originalInputSourceID
-    isInputSourceHandoffActive = !restoreController.isIdle
     record(
       .shortcut,
-      "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=\(forwardingPolicy.keyDownForwarding()), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=0"
+      "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=passThrough, originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=0"
     )
     applyRestoreActions(actions, reason: "shortcutObserved")
   }
@@ -352,8 +330,7 @@ final class AppModel: ObservableObject {
 
   private func scheduleRestore(
     originalInputSourceID: String,
-    delayMilliseconds: Int,
-    maximumDelayMilliseconds: Int
+    delayMilliseconds: Int
   ) {
     pendingRestoreWorkItem?.cancel()
     let workItem = DispatchWorkItem { [weak self] in
@@ -364,7 +341,7 @@ final class AppModel: ObservableObject {
     pendingRestoreWorkItem = workItem
     record(
       .restoration,
-      "restoreScheduled originalInputSourceID=\(originalInputSourceID), delayMs=\(delayMilliseconds), maximumDelayMs=\(maximumDelayMilliseconds), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+      "restoreScheduled originalInputSourceID=\(originalInputSourceID), delayMs=\(delayMilliseconds), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
     )
     DispatchQueue.main.asyncAfter(
       deadline: .now() + .milliseconds(delayMilliseconds),
@@ -398,13 +375,12 @@ final class AppModel: ObservableObject {
         pendingInputSourceTimeoutWorkItem?.cancel()
         pendingInputSourceTimeoutWorkItem = nil
         scheduleTimeout(reason: .runningInputStart, delayMilliseconds: delayMilliseconds)
-      case let .scheduleRestore(originalInputSourceID, delayMilliseconds, maximumDelayMilliseconds):
+      case let .scheduleRestore(originalInputSourceID, delayMilliseconds):
         pendingRunningInputTimeoutWorkItem?.cancel()
         pendingRunningInputTimeoutWorkItem = nil
         scheduleRestore(
           originalInputSourceID: originalInputSourceID,
-          delayMilliseconds: delayMilliseconds,
-          maximumDelayMilliseconds: maximumDelayMilliseconds
+          delayMilliseconds: delayMilliseconds
         )
       case .cancelRunningInputStartTimeout:
         pendingRunningInputTimeoutWorkItem?.cancel()
@@ -421,7 +397,6 @@ final class AppModel: ObservableObject {
         clearCompletedObservation()
       }
     }
-    isInputSourceHandoffActive = !restoreController.isIdle
   }
 
   private func restoreInputSource(_ inputSourceID: String, reason: String) {
@@ -429,18 +404,14 @@ final class AppModel: ObservableObject {
       try inputSourceService.restoreInputSource(id: inputSourceID)
       let currentInputSource = inputSourceService.currentInputSource()
       lastObservedInputSource = currentInputSource
-      isInputSourceHandoffActive = false
       lastFailureMessage = nil
-      lastMessage = "已恢复原输入法"
       record(
         .restoration,
         "restoreCompleted originalInputSourceID=\(inputSourceID), currentInputSource=\(currentInputSource), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
       )
       clearCompletedObservation()
     } catch {
-      isInputSourceHandoffActive = false
       lastFailureMessage = String(describing: error)
-      lastMessage = "恢复原输入法失败"
       record(
         .restoration,
         "restoreSkippedReason=restoreFailed, originalInputSourceID=\(inputSourceID), error=\(error), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
@@ -453,7 +424,6 @@ final class AppModel: ObservableObject {
     cancelPendingWork()
     restoreController.reset()
     clearCompletedObservation()
-    isInputSourceHandoffActive = false
     record(.restoration, "restoreSkippedReason=reset, reason=\(reason), elapsedMs=\(elapsedMilliseconds())")
   }
 

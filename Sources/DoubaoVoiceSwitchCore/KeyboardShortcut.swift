@@ -10,14 +10,3 @@ public struct ShortcutModifiers: OptionSet, Codable, Equatable, Sendable {
   public static let shift = ShortcutModifiers(rawValue: 1 << 2)
   public static let command = ShortcutModifiers(rawValue: 1 << 3)
 }
-
-extension ShortcutModifiers {
-  public var displayText: String {
-    var text = ""
-    if contains(.control) { text += "⌃" }
-    if contains(.option) { text += "⌥" }
-    if contains(.shift) { text += "⇧" }
-    if contains(.command) { text += "⌘" }
-    return text
-  }
-}

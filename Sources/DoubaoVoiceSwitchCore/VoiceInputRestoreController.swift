@@ -2,21 +2,15 @@ public struct VoiceInputRestoreConfiguration: Equatable, Sendable {
   public let doubaoInputSourceTimeoutMilliseconds: Int
   public let runningInputStartTimeoutMilliseconds: Int
   public let restoreStabilityDelayMilliseconds: Int
-  public let restoreMaximumDelayMilliseconds: Int
 
   public init(
     doubaoInputSourceTimeoutMilliseconds: Int = 1_000,
     runningInputStartTimeoutMilliseconds: Int = 1_500,
-    restoreStabilityDelayMilliseconds: Int = 500,
-    restoreMaximumDelayMilliseconds: Int = 1_000
+    restoreStabilityDelayMilliseconds: Int = 500
   ) {
     self.doubaoInputSourceTimeoutMilliseconds = max(0, doubaoInputSourceTimeoutMilliseconds)
     self.runningInputStartTimeoutMilliseconds = max(0, runningInputStartTimeoutMilliseconds)
     self.restoreStabilityDelayMilliseconds = max(0, restoreStabilityDelayMilliseconds)
-    self.restoreMaximumDelayMilliseconds = max(
-      self.restoreStabilityDelayMilliseconds,
-      restoreMaximumDelayMilliseconds
-    )
   }
 }
 
@@ -38,8 +32,7 @@ public enum VoiceInputRestoreAction: Equatable, Sendable {
   case scheduleRunningInputStartTimeout(delayMilliseconds: Int)
   case scheduleRestore(
     originalInputSourceID: String,
-    delayMilliseconds: Int,
-    maximumDelayMilliseconds: Int
+    delayMilliseconds: Int
   )
   case cancelRunningInputStartTimeout
   case restoreInputSource(originalInputSourceID: String)
@@ -189,8 +182,7 @@ public final class VoiceInputRestoreController {
       return [
         .scheduleRestore(
           originalInputSourceID: originalInputSourceID,
-          delayMilliseconds: configuration.restoreStabilityDelayMilliseconds,
-          maximumDelayMilliseconds: configuration.restoreMaximumDelayMilliseconds
+          delayMilliseconds: configuration.restoreStabilityDelayMilliseconds
         )
       ]
     case let .restoring(
@@ -264,8 +256,7 @@ public final class VoiceInputRestoreController {
       0,
       elapsedMilliseconds - runningInputStoppedElapsedMilliseconds
     )
-    guard restoreElapsedMilliseconds >= configuration.restoreStabilityDelayMilliseconds
-      || restoreElapsedMilliseconds >= configuration.restoreMaximumDelayMilliseconds else {
+    guard restoreElapsedMilliseconds >= configuration.restoreStabilityDelayMilliseconds else {
       return []
     }
 
