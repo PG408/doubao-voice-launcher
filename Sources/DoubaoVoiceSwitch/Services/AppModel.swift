@@ -221,16 +221,18 @@ final class AppModel: ObservableObject {
     lastObservedOriginalInputSourceID = nil
     let currentInputSource = lastObservedInputSource ?? inputSourceService.currentInputSource()
     lastObservedInputSource = currentInputSource
+    let isDoubaoRunningInput = audioInputProbe.isRunningInput()
     lastObservedRunningInput = nil
     let stateBefore = restoreController.stateDescription
     let actions = restoreController.shortcutObserved(
       currentInputSource: currentInputSource,
+      isDoubaoRunningInput: isDoubaoRunningInput,
       elapsedMilliseconds: 0
     )
     lastObservedOriginalInputSourceID = restoreController.originalInputSourceID
     record(
       .shortcut,
-      "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=passThrough, originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=0"
+      "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=passThrough, runningInput=\(isDoubaoRunningInput), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=0"
     )
     applyRestoreActions(actions, reason: "shortcutObserved")
   }
@@ -260,8 +262,7 @@ final class AppModel: ObservableObject {
       applyRestoreActions(actions, reason: "currentInputSourceChanged")
     }
 
-    guard restoreController.shouldObserveRunningInput,
-          currentInputSource == .doubao else {
+    guard restoreController.shouldObserveRunningInput else {
       lastObservedRunningInput = nil
       return
     }
@@ -316,11 +317,21 @@ final class AppModel: ObservableObject {
       pendingRunningInputTimeoutWorkItem = nil
     }
 
+    let stateBeforeFinalObservation = restoreController.stateDescription
+    let elapsedAtTimeout = elapsedMilliseconds()
+    observeHandoffSignals()
     let stateBefore = restoreController.stateDescription
     let actions = restoreController.timeoutElapsed(
       reason: reason,
       elapsedMilliseconds: elapsedMilliseconds()
     )
+    guard !actions.isEmpty else {
+      record(
+        .restoration,
+        "timeoutResolvedByFinalObservation reason=\(reason.logValue), handoffStateBefore=\(stateBeforeFinalObservation), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedAtTimeout)"
+      )
+      return
+    }
     record(
       .restoration,
       "timeoutReason=\(reason.logValue), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
@@ -509,6 +520,8 @@ private extension VoiceInputRestoreSkippedReason {
     switch self {
     case .shortcutStartedFromDoubao:
       return "shortcutStartedFromDoubao"
+    case .shortcutObservedDuringActiveVoice:
+      return "shortcutObservedDuringActiveVoice"
     case .originalInputSourceUnavailable:
       return "originalInputSourceUnavailable"
     case .currentInputSourceChangedBeforeRestore:
