@@ -39,23 +39,23 @@
 运行核心行为测试：
 
 ```bash
-rtk swift run DoubaoVoiceSwitchCoreBehaviorTests
+swift run DoubaoVoiceSwitchCoreBehaviorTests
 ```
 
 构建：
 
 ```bash
-rtk swift build
+swift build
 ```
 
 检查 diff：
 
 ```bash
-rtk git diff --check
+git diff --check
 ```
 
 运行并打包本地 app：
 
 ```bash
-rtk ./script/build_and_run.sh --verify
+./script/build_and_run.sh --verify
 ```
