@@ -61,7 +61,7 @@ public final class VoiceInputRestoreController {
 
   public var shouldObserveRunningInput: Bool {
     switch state {
-    case .waitingForRunningInput, .voiceActive, .voiceActiveWithoutRestore, .restoring:
+    case .waitingForRunningInput, .voiceActive, .restoring:
       return true
     case .idle, .waitingForDoubao:
       return false
@@ -132,24 +132,12 @@ public final class VoiceInputRestoreController {
       ]
     case .waitingForRunningInput:
       return []
-    case let .voiceActive(
-      originalInputSourceID,
-      observedElapsedMilliseconds,
-      doubaoSelectedElapsedMilliseconds,
-      runningInputStartedElapsedMilliseconds
-    ):
+    case .voiceActive:
       guard currentInputSource != .doubao else {
         return []
       }
-      state = .voiceActiveWithoutRestore(
-        originalInputSourceID: originalInputSourceID,
-        observedElapsedMilliseconds: observedElapsedMilliseconds,
-        doubaoSelectedElapsedMilliseconds: doubaoSelectedElapsedMilliseconds,
-        runningInputStartedElapsedMilliseconds: runningInputStartedElapsedMilliseconds
-      )
-      return []
-    case .voiceActiveWithoutRestore:
-      return []
+      state = .idle
+      return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
     case .restoring:
       guard currentInputSource != .doubao else {
         return []
@@ -173,21 +161,16 @@ public final class VoiceInputRestoreController {
       guard isRunningInput else {
         return []
       }
-      if currentInputSource == .doubao {
-        state = .voiceActive(
-          originalInputSourceID: originalInputSourceID,
-          observedElapsedMilliseconds: observedElapsedMilliseconds,
-          doubaoSelectedElapsedMilliseconds: doubaoSelectedElapsedMilliseconds,
-          runningInputStartedElapsedMilliseconds: max(0, elapsedMilliseconds)
-        )
-      } else {
-        state = .voiceActiveWithoutRestore(
-          originalInputSourceID: originalInputSourceID,
-          observedElapsedMilliseconds: observedElapsedMilliseconds,
-          doubaoSelectedElapsedMilliseconds: doubaoSelectedElapsedMilliseconds,
-          runningInputStartedElapsedMilliseconds: max(0, elapsedMilliseconds)
-        )
+      guard currentInputSource == .doubao else {
+        state = .idle
+        return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
       }
+      state = .voiceActive(
+        originalInputSourceID: originalInputSourceID,
+        observedElapsedMilliseconds: observedElapsedMilliseconds,
+        doubaoSelectedElapsedMilliseconds: doubaoSelectedElapsedMilliseconds,
+        runningInputStartedElapsedMilliseconds: max(0, elapsedMilliseconds)
+      )
       return [.cancelRunningInputStartTimeout]
     case let .voiceActive(
       originalInputSourceID,
@@ -196,15 +179,6 @@ public final class VoiceInputRestoreController {
       runningInputStartedElapsedMilliseconds
     ):
       guard currentInputSource == .doubao else {
-        if isRunningInput {
-          state = .voiceActiveWithoutRestore(
-            originalInputSourceID: originalInputSourceID,
-            observedElapsedMilliseconds: observedElapsedMilliseconds,
-            doubaoSelectedElapsedMilliseconds: doubaoSelectedElapsedMilliseconds,
-            runningInputStartedElapsedMilliseconds: runningInputStartedElapsedMilliseconds
-          )
-          return []
-        }
         state = .idle
         return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
       }
@@ -224,12 +198,6 @@ public final class VoiceInputRestoreController {
           delayMilliseconds: configuration.restoreStabilityDelayMilliseconds
         )
       ]
-    case .voiceActiveWithoutRestore:
-      guard !isRunningInput else {
-        return []
-      }
-      state = .idle
-      return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
     case let .restoring(
       originalInputSourceID,
       observedElapsedMilliseconds,
@@ -327,12 +295,6 @@ private enum State {
     doubaoSelectedElapsedMilliseconds: Int,
     runningInputStartedElapsedMilliseconds: Int
   )
-  case voiceActiveWithoutRestore(
-    originalInputSourceID: String,
-    observedElapsedMilliseconds: Int,
-    doubaoSelectedElapsedMilliseconds: Int,
-    runningInputStartedElapsedMilliseconds: Int
-  )
   case restoring(
     originalInputSourceID: String,
     observedElapsedMilliseconds: Int,
@@ -348,7 +310,6 @@ private enum State {
     case let .waitingForDoubao(originalInputSourceID, _),
          let .waitingForRunningInput(originalInputSourceID, _, _),
          let .voiceActive(originalInputSourceID, _, _, _),
-         let .voiceActiveWithoutRestore(originalInputSourceID, _, _, _),
          let .restoring(originalInputSourceID, _, _, _, _):
       return originalInputSourceID
     }
@@ -364,8 +325,6 @@ private enum State {
       return "waitingForRunningInput"
     case .voiceActive:
       return "voiceActive"
-    case .voiceActiveWithoutRestore:
-      return "voiceActiveWithoutRestore"
     case .restoring:
       return "restoring"
     }

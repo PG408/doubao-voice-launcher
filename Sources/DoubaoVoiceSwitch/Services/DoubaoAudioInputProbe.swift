@@ -2,10 +2,21 @@ import AppKit
 import CoreAudio
 import Darwin
 
-struct DoubaoAudioInputProbe {
+final class DoubaoAudioInputProbe {
   private static let doubaoImeBundleID = "com.bytedance.inputmethod.doubaoime"
   private static let doubaoImeExecutablePath = "/Library/Input Methods/DoubaoIme.app/Contents/MacOS/DoubaoIme"
   private static let processPathBufferSize = 4_096
+
+  var onRunningInputChanged: ((Bool) -> Void)?
+
+  private let pollingQueue = DispatchQueue(label: "com.bytedance.DoubaoVoiceSwitch.runningInput")
+  private var pollingTimer: DispatchSourceTimer?
+  private var observedProcessObjectID: AudioObjectID?
+  private var lastObservedRunningInput: Bool?
+
+  deinit {
+    stopObserving()
+  }
 
   func isRunningInput() -> Bool {
     guard let processID = doubaoProcessID(),
@@ -13,11 +24,77 @@ struct DoubaoAudioInputProbe {
       return false
     }
 
-    var address = AudioObjectPropertyAddress(
+    return isRunningInput(processObjectID: processObjectID)
+  }
+
+  func startObserving() {
+    guard let processID = doubaoProcessID(),
+          let processObjectID = processObjectID(for: processID) else {
+      stopObserving()
+      return
+    }
+
+    pollingQueue.sync {
+      guard pollingTimer == nil || observedProcessObjectID != processObjectID else {
+        return
+      }
+
+      stopObservingLocked()
+      observedProcessObjectID = processObjectID
+      lastObservedRunningInput = nil
+
+      let timer = DispatchSource.makeTimerSource(queue: pollingQueue)
+      timer.schedule(
+        deadline: .now(),
+        repeating: .milliseconds(10),
+        leeway: .milliseconds(1)
+      )
+      timer.setEventHandler { [weak self] in
+        self?.pollRunningInput()
+      }
+      pollingTimer = timer
+      timer.resume()
+    }
+  }
+
+  func stopObserving() {
+    pollingQueue.sync {
+      stopObservingLocked()
+    }
+  }
+
+  private func stopObservingLocked() {
+    pollingTimer?.setEventHandler {}
+    pollingTimer?.cancel()
+    pollingTimer = nil
+    observedProcessObjectID = nil
+    lastObservedRunningInput = nil
+  }
+
+  private func pollRunningInput() {
+    guard let processObjectID = observedProcessObjectID else {
+      return
+    }
+
+    let runningInput = isRunningInput(processObjectID: processObjectID)
+    guard lastObservedRunningInput != runningInput else {
+      return
+    }
+
+    lastObservedRunningInput = runningInput
+    onRunningInputChanged?(runningInput)
+  }
+
+  private var runningInputAddress: AudioObjectPropertyAddress {
+    AudioObjectPropertyAddress(
       mSelector: kAudioProcessPropertyIsRunningInput,
       mScope: kAudioObjectPropertyScopeGlobal,
       mElement: kAudioObjectPropertyElementMain
     )
+  }
+
+  private func isRunningInput(processObjectID: AudioObjectID) -> Bool {
+    var address = runningInputAddress
     var isRunningInput = UInt32(0)
     var isRunningInputSize = UInt32(MemoryLayout<UInt32>.size)
     let status = AudioObjectGetPropertyData(

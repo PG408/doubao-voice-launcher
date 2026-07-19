@@ -18,14 +18,13 @@ final class AppModel: ObservableObject {
   private let launchAtLoginService = LaunchAtLoginService()
 
   private var readinessTimer: Timer?
-  private var observationTimer: Timer?
+  private var inputSourceObservationTimer: Timer?
   private var registeredShortcut: DoubaoShortcut?
   private var pendingInputSourceTimeoutWorkItem: DispatchWorkItem?
   private var pendingRunningInputTimeoutWorkItem: DispatchWorkItem?
   private var pendingRestoreWorkItem: DispatchWorkItem?
   private var chainStartedAt: Date?
   private var lastObservedInputSource: InputSourceIdentity?
-  private var lastObservedRunningInput: Bool?
   private var lastObservedOriginalInputSourceID: String?
   private var lastLoggedStatus: AppStatus?
   private var lastLoggedPrerequisites: [Bool]?
@@ -42,10 +41,11 @@ final class AppModel: ObservableObject {
     self.hotKeyService = hotKeyService
     self.logger = logger ?? DiagnosticLogger(logDirectory: defaultLogDirectory(), retentionDays: 7)
     configureHotKeyCallbacks()
+    configureAudioInputCallbacks()
     recordLaunchSource()
     refreshReadiness()
     startReadinessPolling()
-    startObservationPolling()
+    startInputSourceObservationPolling()
     pruneLogs()
   }
 
@@ -172,6 +172,16 @@ final class AppModel: ObservableObject {
     }
   }
 
+  private func configureAudioInputCallbacks() {
+    audioInputProbe.onRunningInputChanged = { [weak self] runningInput in
+      DispatchQueue.main.async { [weak self] in
+        MainActor.assumeIsolated {
+          self?.handleRunningInputChanged(runningInput)
+        }
+      }
+    }
+  }
+
   private func recordLaunchSource() {
     let source = ProcessInfo.processInfo.environment["__CFBundleIdentifier"] == nil
       ? "manual or script launch"
@@ -204,15 +214,24 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func startObservationPolling() {
-    observationTimer?.invalidate()
-    observationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-      Task { @MainActor in self?.observeHandoffSignals() }
+  private func startInputSourceObservationPolling() {
+    inputSourceObservationTimer?.invalidate()
+    inputSourceObservationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+      Task { @MainActor in self?.observeInputSource() }
     }
   }
 
   private func handleGlobalShortcutObserved(shortcut: DoubaoShortcut) {
-    guard status == .running, restoreController.isIdle else {
+    guard status == .running else {
+      return
+    }
+
+    if !restoreController.isIdle {
+      let currentInputSource = inputSourceService.currentInputSource()
+      record(
+        .shortcut,
+        "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=passThrough, repeatedDuringHandoff=true, runningInput=\(audioInputProbe.isRunningInput()), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+      )
       return
     }
 
@@ -222,7 +241,6 @@ final class AppModel: ObservableObject {
     let currentInputSource = lastObservedInputSource ?? inputSourceService.currentInputSource()
     lastObservedInputSource = currentInputSource
     let isDoubaoRunningInput = audioInputProbe.isRunningInput()
-    lastObservedRunningInput = nil
     let stateBefore = restoreController.stateDescription
     let actions = restoreController.shortcutObserved(
       currentInputSource: currentInputSource,
@@ -237,11 +255,16 @@ final class AppModel: ObservableObject {
     applyRestoreActions(actions, reason: "shortcutObserved")
   }
 
-  private func observeHandoffSignals() {
+  private func observeInputSource() {
     guard status == .running else {
       return
     }
 
+    _ = observeCurrentInputSource()
+  }
+
+  @discardableResult
+  private func observeCurrentInputSource() -> InputSourceIdentity {
     let currentInputSource = inputSourceService.currentInputSource()
     if lastObservedInputSource != currentInputSource {
       lastObservedInputSource = currentInputSource
@@ -262,26 +285,30 @@ final class AppModel: ObservableObject {
       applyRestoreActions(actions, reason: "currentInputSourceChanged")
     }
 
-    guard restoreController.shouldObserveRunningInput else {
-      lastObservedRunningInput = nil
+    return currentInputSource
+  }
+
+  private func handleRunningInputChanged(_ runningInput: Bool) {
+    guard status == .running else {
       return
     }
 
-    let runningInput = audioInputProbe.isRunningInput()
-    if lastObservedRunningInput != runningInput {
-      lastObservedRunningInput = runningInput
-      let stateBefore = restoreController.stateDescription
-      let actions = restoreController.runningInputChanged(
-        isRunningInput: runningInput,
-        currentInputSource: currentInputSource,
-        elapsedMilliseconds: elapsedMilliseconds()
-      )
-      record(
-        .voiceReadiness,
-        "runningInput transition runningInput=\(runningInput), currentInputSource=\(currentInputSource), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
-      )
-      applyRestoreActions(actions, reason: "runningInputChanged")
+    let currentInputSource = observeCurrentInputSource()
+    guard restoreController.shouldObserveRunningInput else {
+      return
     }
+
+    let stateBefore = restoreController.stateDescription
+    let actions = restoreController.runningInputChanged(
+      isRunningInput: runningInput,
+      currentInputSource: currentInputSource,
+      elapsedMilliseconds: elapsedMilliseconds()
+    )
+    record(
+      .voiceReadiness,
+      "runningInput transition runningInput=\(runningInput), currentInputSource=\(currentInputSource), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+    )
+    applyRestoreActions(actions, reason: "runningInputChanged")
   }
 
   private func scheduleTimeout(
@@ -317,19 +344,13 @@ final class AppModel: ObservableObject {
       pendingRunningInputTimeoutWorkItem = nil
     }
 
-    let stateBeforeFinalObservation = restoreController.stateDescription
-    let elapsedAtTimeout = elapsedMilliseconds()
-    observeHandoffSignals()
+    observeInputSource()
     let stateBefore = restoreController.stateDescription
     let actions = restoreController.timeoutElapsed(
       reason: reason,
       elapsedMilliseconds: elapsedMilliseconds()
     )
     guard !actions.isEmpty else {
-      record(
-        .restoration,
-        "timeoutResolvedByFinalObservation reason=\(reason.logValue), handoffStateBefore=\(stateBeforeFinalObservation), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedAtTimeout)"
-      )
       return
     }
     record(
@@ -408,6 +429,16 @@ final class AppModel: ObservableObject {
         clearCompletedObservation()
       }
     }
+    updateRunningInputObservation()
+  }
+
+  private func updateRunningInputObservation() {
+    guard status == .running, restoreController.shouldObserveRunningInput else {
+      audioInputProbe.stopObserving()
+      return
+    }
+
+    audioInputProbe.startObserving()
   }
 
   private func restoreInputSource(_ inputSourceID: String, reason: String) {
@@ -448,8 +479,8 @@ final class AppModel: ObservableObject {
   }
 
   private func clearCompletedObservation() {
+    audioInputProbe.stopObserving()
     chainStartedAt = nil
-    lastObservedRunningInput = nil
     lastObservedOriginalInputSourceID = nil
   }
 
