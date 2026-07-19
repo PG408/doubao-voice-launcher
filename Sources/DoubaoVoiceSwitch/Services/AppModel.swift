@@ -122,7 +122,7 @@ final class AppModel: ObservableObject {
       try hotKeyService.register(shortcut: storedShortcut)
       registeredShortcut = storedShortcut
       lastFailureMessage = nil
-      record(.shortcut, "registered shortcut \(storedShortcut.displayText)")
+      record(.shortcut, "registered shortcut \(storedShortcut.displayText), observer=listenOnlyEventTap")
     } catch {
       registeredShortcut = nil
       lastFailureMessage = String(describing: error)
@@ -168,6 +168,11 @@ final class AppModel: ObservableObject {
     hotKeyService.onShortcutObserved = { [weak self] shortcut in
       MainActor.assumeIsolated {
         self?.handleGlobalShortcutObserved(shortcut: shortcut)
+      }
+    }
+    hotKeyService.onMonitorEvent = { [weak self] event in
+      MainActor.assumeIsolated {
+        self?.record(.shortcut, event.logDescription)
       }
     }
   }

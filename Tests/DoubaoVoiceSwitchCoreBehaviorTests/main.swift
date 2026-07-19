@@ -147,6 +147,26 @@ func testShortcutPressObserverRejectsExtraPhysicalModifiers() throws {
   )
 }
 
+func testShortcutPressObserverResetClearsIncompletePress() throws {
+  var observer = ShortcutPressObserver(shortcut: DoubaoShortcut(keys: [.rightCommand]))
+
+  _ = observer.observe(
+    key: .rightCommand,
+    activeModifiers: [.command],
+    isFunctionActive: false
+  )
+  observer.reset()
+  try expectEqual(
+    observer.observe(
+      key: .rightCommand,
+      activeModifiers: [.command],
+      isFunctionActive: false
+    ),
+    true,
+    "event tap 恢复后应从干净状态识别下一次快捷键"
+  )
+}
+
 func testDefaultDoubaoInputSourceTimeoutIsTwoSeconds() throws {
   let controller = VoiceInputRestoreController()
 
@@ -535,6 +555,10 @@ let tests: [(String, () throws -> Void)] = [
   (
     "testShortcutPressObserverRejectsExtraPhysicalModifiers",
     testShortcutPressObserverRejectsExtraPhysicalModifiers
+  ),
+  (
+    "testShortcutPressObserverResetClearsIncompletePress",
+    testShortcutPressObserverResetClearsIncompletePress
   ),
   (
     "testDefaultDoubaoInputSourceTimeoutIsTwoSeconds",

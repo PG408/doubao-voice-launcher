@@ -34,6 +34,11 @@ public struct ShortcutPressObserver: Sendable {
     return false
   }
 
+  public mutating func reset() {
+    activeKeys.removeAll()
+    isShortcutPressed = false
+  }
+
   private mutating func updateActiveKeys(
     key: DoubaoShortcutKey,
     activeModifiers: ShortcutModifiers,
