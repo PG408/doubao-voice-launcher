@@ -420,7 +420,7 @@ func testTransientInputSourceStillTimesOutWhenRunningInputNeverStarts() throws {
   try expectEqual(controller.stateDescription, "idle", "runningInput 超时后应回到 idle")
 }
 
-func testVoiceStopsTrackingAfterInputSourceLeavesDoubao() throws {
+func testVoiceKeepsTrackingAcrossTransientInputSourceChange() throws {
   let controller = VoiceInputRestoreController(configuration: .test)
   let originalInputSource = InputSourceIdentity.other("com.sogou.inputmethod.sogou.pinyin")
 
@@ -430,14 +430,30 @@ func testVoiceStopsTrackingAfterInputSourceLeavesDoubao() throws {
 
   try expectEqual(
     controller.currentInputSourceChanged(to: originalInputSource, elapsedMilliseconds: 600),
-    [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)],
-    "语音活动期间输入法离开豆包时应立即取消恢复"
+    [],
+    "语音活动期间输入法短暂离开豆包时应继续追踪"
   )
-  try expectEqual(controller.stateDescription, "idle", "取消恢复后应立即回到 idle")
-  try expectEqual(controller.shouldObserveRunningInput, false, "取消恢复后应停止采样 runningInput")
+  try expectEqual(controller.stateDescription, "voiceActive", "输入法抖动后应保持语音活动状态")
+  try expectEqual(controller.shouldObserveRunningInput, true, "输入法抖动后应继续采样 runningInput")
+
+  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 800)
+  try expectEqual(
+    controller.runningInputChanged(
+      isRunningInput: false,
+      currentInputSource: .doubao,
+      elapsedMilliseconds: 1_000
+    ),
+    [
+      .scheduleRestore(
+        originalInputSourceID: "com.sogou.inputmethod.sogou.pinyin",
+        delayMilliseconds: 500
+      )
+    ],
+    "输入法回到豆包后语音结束应正常安排恢复"
+  )
 }
 
-func testRunningInputAfterSourceRollbackCancelsRestoreChain() throws {
+func testRunningInputAfterSourceRollbackKeepsRestoreChain() throws {
   let controller = VoiceInputRestoreController(configuration: .test)
   let originalInputSource = InputSourceIdentity.other("com.sogou.inputmethod.sogou.pinyin")
 
@@ -451,11 +467,22 @@ func testRunningInputAfterSourceRollbackCancelsRestoreChain() throws {
       currentInputSource: originalInputSource,
       elapsedMilliseconds: 1_600
     ),
-    [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)],
-    "runningInput=true 时当前已不是豆包应取消恢复链路"
+    [.cancelRunningInputStartTimeout],
+    "runningInput=true 应确认语音开始，不应受瞬时输入法变化影响"
   )
-  try expectEqual(controller.stateDescription, "idle", "输入法已离开豆包时应回到 idle")
-  try expectEqual(controller.shouldObserveRunningInput, false, "取消链路后应停止采样 runningInput")
+  try expectEqual(controller.stateDescription, "voiceActive", "确认语音开始后应进入 voiceActive")
+  try expectEqual(controller.shouldObserveRunningInput, true, "确认语音开始后应继续采样 runningInput")
+
+  try expectEqual(
+    controller.runningInputChanged(
+      isRunningInput: false,
+      currentInputSource: originalInputSource,
+      elapsedMilliseconds: 2_000
+    ),
+    [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)],
+    "语音结束时当前已是原输入法则不得再次恢复"
+  )
+  try expectEqual(controller.stateDescription, "idle", "无需恢复时应回到 idle")
 }
 
 func testRestoreWaitsForStabilityDelay() throws {
@@ -596,12 +623,12 @@ let tests: [(String, () throws -> Void)] = [
     testTransientInputSourceStillTimesOutWhenRunningInputNeverStarts
   ),
   (
-    "testVoiceStopsTrackingAfterInputSourceLeavesDoubao",
-    testVoiceStopsTrackingAfterInputSourceLeavesDoubao
+    "testVoiceKeepsTrackingAcrossTransientInputSourceChange",
+    testVoiceKeepsTrackingAcrossTransientInputSourceChange
   ),
   (
-    "testRunningInputAfterSourceRollbackCancelsRestoreChain",
-    testRunningInputAfterSourceRollbackCancelsRestoreChain
+    "testRunningInputAfterSourceRollbackKeepsRestoreChain",
+    testRunningInputAfterSourceRollbackKeepsRestoreChain
   ),
   ("testRestoreWaitsForStabilityDelay", testRestoreWaitsForStabilityDelay),
   ("testUserSwitchesAwayBeforeRestoreDoesNotRestore", testUserSwitchesAwayBeforeRestoreDoesNotRestore),

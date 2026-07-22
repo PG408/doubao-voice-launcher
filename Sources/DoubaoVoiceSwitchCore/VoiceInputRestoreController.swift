@@ -133,11 +133,7 @@ public final class VoiceInputRestoreController {
     case .waitingForRunningInput:
       return []
     case .voiceActive:
-      guard currentInputSource != .doubao else {
-        return []
-      }
-      state = .idle
-      return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
+      return []
     case .restoring:
       guard currentInputSource != .doubao else {
         return []
@@ -160,10 +156,6 @@ public final class VoiceInputRestoreController {
     ):
       guard isRunningInput else {
         return []
-      }
-      guard currentInputSource == .doubao else {
-        state = .idle
-        return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
       }
       state = .voiceActive(
         originalInputSourceID: originalInputSourceID,
