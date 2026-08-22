@@ -91,7 +91,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleIconName</key>
   <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.7</string>
+  <string>0.3.0</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>CFBundlePackageType</key>

@@ -11,7 +11,6 @@ final class AppModel: ObservableObject {
 
   private let probe: PlatformReadinessProbe
   private let logger: DiagnosticLogger
-  private let hotKeyService: GlobalHotKeyService
   private let inputSourceService = InputSourceService()
   private let audioInputProbe = DoubaoAudioInputProbe()
   private let restoreController = VoiceInputRestoreController()
@@ -19,28 +18,24 @@ final class AppModel: ObservableObject {
 
   private var readinessTimer: Timer?
   private var inputSourceObservationTimer: Timer?
-  private var registeredShortcut: DoubaoShortcut?
-  private var pendingInputSourceTimeoutWorkItem: DispatchWorkItem?
-  private var pendingRunningInputTimeoutWorkItem: DispatchWorkItem?
-  private var pendingRestoreWorkItem: DispatchWorkItem?
+  private var pendingDeadlineWorkItem: DispatchWorkItem?
   private var chainStartedAt: Date?
   private var lastObservedInputSource: InputSourceIdentity?
-  private var lastObservedOriginalInputSourceID: String?
   private var lastLoggedStatus: AppStatus?
-  private var lastLoggedPrerequisites: [Bool]?
-
-  private var accessibilityTrusted = false
+  private var lastLoggedDoubaoAvailability: Bool?
   private var doubaoInputSourceAvailable = false
 
   private init(
     probe: PlatformReadinessProbe = PlatformReadinessProbe(),
-    hotKeyService: GlobalHotKeyService = GlobalHotKeyService(),
     logger: DiagnosticLogger? = nil
   ) {
     self.probe = probe
-    self.hotKeyService = hotKeyService
     self.logger = logger ?? DiagnosticLogger(logDirectory: defaultLogDirectory(), retentionDays: 7)
-    configureHotKeyCallbacks()
+
+    let currentInputSource = inputSourceService.currentInputSource()
+    lastObservedInputSource = currentInputSource
+    restoreController.synchronizeCurrentInputSource(currentInputSource)
+
     configureAudioInputCallbacks()
     recordLaunchSource()
     refreshReadiness()
@@ -57,23 +52,8 @@ final class AppModel: ObservableObject {
     status.title
   }
 
-  var prerequisites: [PrerequisiteItem] {
-    [
-      PrerequisiteItem(
-        id: "accessibility",
-        title: "辅助功能权限",
-        detail: accessibilityTrusted ? "已开启" : "需要手动授权后才能观察豆包语音快捷键",
-        isReady: accessibilityTrusted,
-        actionTitle: accessibilityTrusted ? nil : "请求授权"
-      ),
-      PrerequisiteItem(
-        id: "doubao",
-        title: "豆包输入法",
-        detail: doubaoInputSourceAvailable ? "已检测到" : "未检测到豆包输入法",
-        isReady: doubaoInputSourceAvailable,
-        actionTitle: nil
-      ),
-    ]
+  var isDoubaoInputSourceAvailable: Bool {
+    doubaoInputSourceAvailable
   }
 
   var logDirectory: URL {
@@ -81,10 +61,7 @@ final class AppModel: ObservableObject {
   }
 
   func refreshReadiness() {
-    accessibilityTrusted = probe.isAccessibilityTrusted()
     doubaoInputSourceAvailable = probe.isDoubaoInputSourceAvailable()
-
-    readinessState.setAccessibilityTrusted(accessibilityTrusted)
     readinessState.setDoubaoInputSourceAvailable(doubaoInputSourceAvailable)
 
     if status == .preparing, !restoreController.isIdle {
@@ -92,52 +69,19 @@ final class AppModel: ObservableObject {
     }
 
     recordReadinessIfChanged()
-    updateGlobalShortcutRegistration()
   }
 
   func pause() {
     resetObservation(reason: "pause")
     readinessState.pause()
     record(.app, "paused by user")
-    updateGlobalShortcutRegistration()
   }
 
   func resume() {
     readinessState.resume()
     refreshReadiness()
+    resetObservation(reason: "resume")
     record(.app, "resumed by user")
-  }
-
-  func updateGlobalShortcutRegistration() {
-    guard status == .running else {
-      hotKeyService.unregister()
-      registeredShortcut = nil
-      return
-    }
-
-    guard registeredShortcut != storedShortcut else {
-      return
-    }
-    do {
-      try hotKeyService.register(shortcut: storedShortcut)
-      registeredShortcut = storedShortcut
-      lastFailureMessage = nil
-      record(.shortcut, "registered shortcut \(storedShortcut.displayText), observer=listenOnlyEventTap")
-    } catch {
-      registeredShortcut = nil
-      lastFailureMessage = String(describing: error)
-      record(.shortcut, "shortcut registration failed: \(error)")
-    }
-  }
-
-  func openAccessibilitySettings() {
-    probe.requestAccessibilityTrustPrompt()
-    record(.app, "requested accessibility trust prompt")
-
-    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-      NSWorkspace.shared.open(url)
-      activateOpenedApplication(bundleIdentifier: "com.apple.systempreferences")
-    }
   }
 
   func openLogFolder() {
@@ -164,19 +108,6 @@ final class AppModel: ObservableObject {
     launchAtLoginService.isEnabled()
   }
 
-  private func configureHotKeyCallbacks() {
-    hotKeyService.onShortcutObserved = { [weak self] shortcut in
-      MainActor.assumeIsolated {
-        self?.handleGlobalShortcutObserved(shortcut: shortcut)
-      }
-    }
-    hotKeyService.onMonitorEvent = { [weak self] event in
-      MainActor.assumeIsolated {
-        self?.record(.shortcut, event.logDescription)
-      }
-    }
-  }
-
   private func configureAudioInputCallbacks() {
     audioInputProbe.onRunningInputChanged = { [weak self] runningInput in
       DispatchQueue.main.async { [weak self] in
@@ -195,20 +126,16 @@ final class AppModel: ObservableObject {
   }
 
   private func recordReadinessIfChanged() {
-    let currentPrerequisites = [
-      accessibilityTrusted,
-      doubaoInputSourceAvailable
-    ]
-
-    guard lastLoggedStatus != status || lastLoggedPrerequisites != currentPrerequisites else {
+    guard lastLoggedStatus != status
+      || lastLoggedDoubaoAvailability != doubaoInputSourceAvailable else {
       return
     }
 
     lastLoggedStatus = status
-    lastLoggedPrerequisites = currentPrerequisites
+    lastLoggedDoubaoAvailability = doubaoInputSourceAvailable
     record(
       .app,
-      "readiness status \(status.title), accessibility=\(accessibilityTrusted), doubaoInputSource=\(doubaoInputSourceAvailable)"
+      "readiness status \(status.title), doubaoInputSource=\(doubaoInputSourceAvailable)"
     )
   }
 
@@ -226,70 +153,33 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func handleGlobalShortcutObserved(shortcut: DoubaoShortcut) {
-    guard status == .running else {
-      return
-    }
-
-    if !restoreController.isIdle {
-      let currentInputSource = inputSourceService.currentInputSource()
-      record(
-        .shortcut,
-        "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=passThrough, repeatedDuringHandoff=true, runningInput=\(audioInputProbe.isRunningInput()), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
-      )
-      return
-    }
-
-    cancelPendingWork()
-    chainStartedAt = Date()
-    lastObservedOriginalInputSourceID = nil
-    let currentInputSource = lastObservedInputSource ?? inputSourceService.currentInputSource()
-    lastObservedInputSource = currentInputSource
-    let isDoubaoRunningInput = audioInputProbe.isRunningInput()
-    let stateBefore = restoreController.stateDescription
-    let actions = restoreController.shortcutObserved(
-      currentInputSource: currentInputSource,
-      isDoubaoRunningInput: isDoubaoRunningInput,
-      elapsedMilliseconds: 0
-    )
-    lastObservedOriginalInputSourceID = restoreController.originalInputSourceID
-    record(
-      .shortcut,
-      "shortcutObserved shortcut=\(shortcut.displayText), eventDisposition=passThrough, runningInput=\(isDoubaoRunningInput), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), currentInputSource=\(currentInputSource), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=0"
-    )
-    applyRestoreActions(actions, reason: "shortcutObserved")
-  }
-
   private func observeInputSource() {
     guard status == .running else {
       return
     }
 
     _ = observeCurrentInputSource()
+    updateRunningInputObservation()
   }
 
   @discardableResult
   private func observeCurrentInputSource() -> InputSourceIdentity {
     let currentInputSource = inputSourceService.currentInputSource()
-    if lastObservedInputSource != currentInputSource {
-      lastObservedInputSource = currentInputSource
-      let stateBefore = restoreController.stateDescription
-      let actions = restoreController.currentInputSourceChanged(
-        to: currentInputSource,
-        elapsedMilliseconds: elapsedMilliseconds()
-      )
-      let transientInputSource = stateBefore == "waitingForRunningInput"
-        && restoreController.stateDescription == "waitingForRunningInput"
-        && currentInputSource != .doubao
-        ? ", transientInputSource=\(currentInputSource)"
-        : ""
-      record(
-        .inputSource,
-        "currentInputSource=\(currentInputSource), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription)\(transientInputSource), elapsedMs=\(elapsedMilliseconds())"
-      )
-      applyRestoreActions(actions, reason: "currentInputSourceChanged")
+    guard lastObservedInputSource != currentInputSource else {
+      return currentInputSource
     }
 
+    lastObservedInputSource = currentInputSource
+    let stateBefore = restoreController.stateDescription
+    let actions = restoreController.currentInputSourceChanged(
+      to: currentInputSource,
+      recognitionWindowMilliseconds: recognitionWindowMilliseconds
+    )
+    record(
+      .inputSource,
+      "currentInputSource=\(currentInputSource), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+    )
+    applyRestoreActions(actions, reason: "currentInputSourceChanged")
     return currentInputSource
   }
 
@@ -304,11 +194,7 @@ final class AppModel: ObservableObject {
     }
 
     let stateBefore = restoreController.stateDescription
-    let actions = restoreController.runningInputChanged(
-      isRunningInput: runningInput,
-      currentInputSource: currentInputSource,
-      elapsedMilliseconds: elapsedMilliseconds()
-    )
+    let actions = restoreController.runningInputChanged(isRunningInput: runningInput)
     record(
       .voiceReadiness,
       "runningInput transition runningInput=\(runningInput), currentInputSource=\(currentInputSource), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
@@ -316,24 +202,27 @@ final class AppModel: ObservableObject {
     applyRestoreActions(actions, reason: "runningInputChanged")
   }
 
-  private func scheduleTimeout(
-    reason: VoiceInputRestoreTimeoutReason,
+  private func scheduleDeadline(
+    _ deadline: VoiceInputRestoreDeadline,
     delayMilliseconds: Int
   ) {
-    let workItem = DispatchWorkItem { [weak self] in
-      MainActor.assumeIsolated {
-        self?.runTimeout(reason: reason)
-      }
+    cancelPendingDeadline()
+
+    if deadline == .recognitionWindow {
+      chainStartedAt = Date()
     }
 
-    switch reason {
-    case .doubaoInputSource:
-      pendingInputSourceTimeoutWorkItem?.cancel()
-      pendingInputSourceTimeoutWorkItem = workItem
-    case .runningInputStart:
-      pendingRunningInputTimeoutWorkItem?.cancel()
-      pendingRunningInputTimeoutWorkItem = workItem
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        self?.runDeadline(deadline)
+      }
     }
+    pendingDeadlineWorkItem = workItem
+
+    record(
+      deadline == .recognitionWindow ? .recognition : .restoration,
+      "deadlineScheduled type=\(deadline.logValue), originalInputSourceID=\(restoreController.originalInputSourceID ?? "none"), delayMs=\(delayMilliseconds), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+    )
 
     DispatchQueue.main.asyncAfter(
       deadline: .now() + .milliseconds(delayMilliseconds),
@@ -341,95 +230,44 @@ final class AppModel: ObservableObject {
     )
   }
 
-  private func runTimeout(reason: VoiceInputRestoreTimeoutReason) {
-    switch reason {
-    case .doubaoInputSource:
-      pendingInputSourceTimeoutWorkItem = nil
-    case .runningInputStart:
-      pendingRunningInputTimeoutWorkItem = nil
-    }
+  private func runDeadline(_ deadline: VoiceInputRestoreDeadline) {
+    pendingDeadlineWorkItem = nil
+    _ = observeCurrentInputSource()
 
-    observeInputSource()
+    let originalInputSourceID = restoreController.originalInputSourceID
+    let originalAvailable = originalInputSourceID.map {
+      inputSourceService.isInputSourceAvailable(id: $0)
+    } ?? false
     let stateBefore = restoreController.stateDescription
-    let actions = restoreController.timeoutElapsed(
-      reason: reason,
-      elapsedMilliseconds: elapsedMilliseconds()
+    let actions = restoreController.deadlineElapsed(
+      deadline,
+      isOriginalInputSourceAvailable: originalAvailable
     )
     guard !actions.isEmpty else {
       return
     }
-    record(
-      .restoration,
-      "timeoutReason=\(reason.logValue), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
-    )
-    applyRestoreActions(actions, reason: "timeoutElapsed")
-  }
 
-  private func scheduleRestore(
-    originalInputSourceID: String,
-    delayMilliseconds: Int
-  ) {
-    pendingRestoreWorkItem?.cancel()
-    let workItem = DispatchWorkItem { [weak self] in
-      MainActor.assumeIsolated {
-        self?.runRestoreWindow(originalInputSourceID: originalInputSourceID)
-      }
-    }
-    pendingRestoreWorkItem = workItem
     record(
-      .restoration,
-      "restoreScheduled originalInputSourceID=\(originalInputSourceID), delayMs=\(delayMilliseconds), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
+      deadline == .recognitionWindow ? .recognition : .restoration,
+      "deadlineElapsed type=\(deadline.logValue), originalInputSourceID=\(originalInputSourceID ?? "none"), originalAvailable=\(originalAvailable), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
     )
-    DispatchQueue.main.asyncAfter(
-      deadline: .now() + .milliseconds(delayMilliseconds),
-      execute: workItem
-    )
-  }
-
-  private func runRestoreWindow(originalInputSourceID: String) {
-    pendingRestoreWorkItem = nil
-    let currentInputSource = inputSourceService.currentInputSource()
-    let isOriginalAvailable = inputSourceService.isInputSourceAvailable(id: originalInputSourceID)
-    let stateBefore = restoreController.stateDescription
-    let actions = restoreController.restoreWindowElapsed(
-      currentInputSource: currentInputSource,
-      isOriginalInputSourceAvailable: isOriginalAvailable,
-      elapsedMilliseconds: elapsedMilliseconds()
-    )
-    record(
-      .restoration,
-      "restoreWindowElapsed originalInputSourceID=\(originalInputSourceID), originalAvailable=\(isOriginalAvailable), currentInputSource=\(currentInputSource), handoffStateBefore=\(stateBefore), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds())"
-    )
-    applyRestoreActions(actions, reason: "restoreWindowElapsed")
+    applyRestoreActions(actions, reason: "deadlineElapsed")
   }
 
   private func applyRestoreActions(_ actions: [VoiceInputRestoreAction], reason: String) {
     for action in actions {
       switch action {
-      case let .scheduleInputSourceChangeTimeout(delayMilliseconds):
-        scheduleTimeout(reason: .doubaoInputSource, delayMilliseconds: delayMilliseconds)
-      case let .scheduleRunningInputStartTimeout(delayMilliseconds):
-        pendingInputSourceTimeoutWorkItem?.cancel()
-        pendingInputSourceTimeoutWorkItem = nil
-        scheduleTimeout(reason: .runningInputStart, delayMilliseconds: delayMilliseconds)
-      case let .scheduleRestore(originalInputSourceID, delayMilliseconds):
-        pendingRunningInputTimeoutWorkItem?.cancel()
-        pendingRunningInputTimeoutWorkItem = nil
-        scheduleRestore(
-          originalInputSourceID: originalInputSourceID,
-          delayMilliseconds: delayMilliseconds
-        )
-      case .cancelRunningInputStartTimeout:
-        pendingRunningInputTimeoutWorkItem?.cancel()
-        pendingRunningInputTimeoutWorkItem = nil
+      case let .scheduleDeadline(deadline, delayMilliseconds):
+        scheduleDeadline(deadline, delayMilliseconds: delayMilliseconds)
+      case .cancelDeadline:
+        cancelPendingDeadline()
       case let .restoreInputSource(originalInputSourceID):
         restoreInputSource(originalInputSourceID, reason: reason)
-      case let .skipRestore(skippedReason):
-        cancelPendingWork()
-        let originalInputSourceID = lastObservedOriginalInputSourceID ?? restoreController.originalInputSourceID ?? "none"
+      case let .skipRestore(skippedReason, originalInputSourceID):
+        cancelPendingDeadline()
         record(
           .restoration,
-          "restoreSkippedReason=\(skippedReason.logValue), currentInputSource=\(inputSourceService.currentInputSource()), originalInputSourceID=\(originalInputSourceID), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
+          "restoreSkippedReason=\(skippedReason.logValue), currentInputSource=\(inputSourceService.currentInputSource()), originalInputSourceID=\(originalInputSourceID ?? "none"), handoffState=\(restoreController.stateDescription), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
         )
         clearCompletedObservation()
       }
@@ -442,7 +280,6 @@ final class AppModel: ObservableObject {
       audioInputProbe.stopObserving()
       return
     }
-
     audioInputProbe.startObserving()
   }
 
@@ -451,53 +288,59 @@ final class AppModel: ObservableObject {
       try inputSourceService.restoreInputSource(id: inputSourceID)
       let currentInputSource = inputSourceService.currentInputSource()
       lastObservedInputSource = currentInputSource
+      restoreController.synchronizeCurrentInputSource(currentInputSource)
       lastFailureMessage = nil
       record(
         .restoration,
         "restoreCompleted originalInputSourceID=\(inputSourceID), currentInputSource=\(currentInputSource), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
       )
-      clearCompletedObservation()
     } catch {
+      let currentInputSource = inputSourceService.currentInputSource()
+      lastObservedInputSource = currentInputSource
+      restoreController.synchronizeCurrentInputSource(currentInputSource)
       lastFailureMessage = String(describing: error)
       record(
         .restoration,
         "restoreSkippedReason=restoreFailed, originalInputSourceID=\(inputSourceID), error=\(error), elapsedMs=\(elapsedMilliseconds()), reason=\(reason)"
       )
-      clearCompletedObservation()
     }
+    clearCompletedObservation()
   }
 
   private func resetObservation(reason: String) {
-    cancelPendingWork()
-    restoreController.reset()
-    clearCompletedObservation()
-    record(.restoration, "restoreSkippedReason=reset, reason=\(reason), elapsedMs=\(elapsedMilliseconds())")
+    cancelPendingDeadline()
+    audioInputProbe.stopObserving()
+    chainStartedAt = nil
+
+    let currentInputSource = inputSourceService.currentInputSource()
+    lastObservedInputSource = currentInputSource
+    restoreController.synchronizeCurrentInputSource(currentInputSource)
+    record(.restoration, "restoreSkippedReason=reset, reason=\(reason)")
   }
 
-  private func cancelPendingWork() {
-    pendingInputSourceTimeoutWorkItem?.cancel()
-    pendingInputSourceTimeoutWorkItem = nil
-    pendingRunningInputTimeoutWorkItem?.cancel()
-    pendingRunningInputTimeoutWorkItem = nil
-    pendingRestoreWorkItem?.cancel()
-    pendingRestoreWorkItem = nil
+  private func cancelPendingDeadline() {
+    pendingDeadlineWorkItem?.cancel()
+    pendingDeadlineWorkItem = nil
   }
 
   private func clearCompletedObservation() {
     audioInputProbe.stopObserving()
     chainStartedAt = nil
-    lastObservedOriginalInputSourceID = nil
   }
 
-  private var storedShortcut: DoubaoShortcut {
-    DoubaoShortcut(storageValue: UserDefaults.standard.string(forKey: "doubaoShortcutKeys"))
+  private var recognitionWindowMilliseconds: Int {
+    let defaults = UserDefaults.standard
+    let seconds = defaults.object(forKey: "recognitionWindowSeconds") == nil
+      ? VoiceSessionRecognitionPolicy.defaultWindowSeconds
+      : defaults.double(forKey: "recognitionWindowSeconds")
+    return VoiceSessionRecognitionPolicy.windowMilliseconds(for: seconds)
   }
 
   private func elapsedMilliseconds() -> Int {
     guard let chainStartedAt else {
       return 0
     }
-    return max(0, Int(Date().timeIntervalSince(chainStartedAt) * 1000))
+    return max(0, Int(Date().timeIntervalSince(chainStartedAt) * 1_000))
   }
 
   private func pruneLogs() {
@@ -521,12 +364,7 @@ final class AppModel: ObservableObject {
         .first else {
         return
       }
-
-      if #available(macOS 14.0, *) {
-        application.activate(options: [.activateAllWindows])
-      } else {
-        application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-      }
+      application.activate(options: [.activateAllWindows])
     }
   }
 }
@@ -534,19 +372,18 @@ final class AppModel: ObservableObject {
 private func defaultLogDirectory() -> URL {
   let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
     ?? FileManager.default.temporaryDirectory
-
   return base
     .appendingPathComponent("DoubaoVoiceSwitch", isDirectory: true)
     .appendingPathComponent("Logs", isDirectory: true)
 }
 
-private extension VoiceInputRestoreTimeoutReason {
+private extension VoiceInputRestoreDeadline {
   var logValue: String {
     switch self {
-    case .doubaoInputSource:
-      return "doubaoInputSource"
-    case .runningInputStart:
-      return "runningInputStart"
+    case .recognitionWindow:
+      return "recognitionWindow"
+    case .restoreWindow:
+      return "restoreWindow"
     }
   }
 }
@@ -554,18 +391,14 @@ private extension VoiceInputRestoreTimeoutReason {
 private extension VoiceInputRestoreSkippedReason {
   var logValue: String {
     switch self {
-    case .shortcutStartedFromDoubao:
-      return "shortcutStartedFromDoubao"
-    case .shortcutObservedDuringActiveVoice:
-      return "shortcutObservedDuringActiveVoice"
+    case .returnedToOriginalBeforeVoice:
+      return "returnedToOriginalBeforeVoice"
+    case .recognitionWindowExpired:
+      return "recognitionWindowExpired"
     case .originalInputSourceUnavailable:
       return "originalInputSourceUnavailable"
-    case .currentInputSourceChangedBeforeRestore:
-      return "currentInputSourceChangedBeforeRestore"
-    case .doubaoInputSourceTimedOut:
-      return "doubaoInputSourceTimedOut"
-    case .runningInputStartTimedOut:
-      return "runningInputStartTimedOut"
+    case .alreadyAtOriginalInputSource:
+      return "alreadyAtOriginalInputSource"
     }
   }
 }

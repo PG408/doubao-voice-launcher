@@ -17,13 +17,13 @@ ICON_FILE = RESOURCE_DIR / "AppIcon.icns"
 SOURCE_PNG = RESOURCE_DIR / "AppIcon-1024.png"
 
 
-def draw_voice_key(
+def draw_voice_mark(
     draw: ImageDraw.ImageDraw,
     bounds: tuple[int, int, int, int],
     color: tuple[int, int, int, int],
     background: tuple[int, int, int, int],
 ) -> None:
-    """绘制极简的“快捷键 + 语音”符号。"""
+    """绘制极简语音恢复符号。"""
     x0, y0, x1, y1 = bounds
     width = x1 - x0
     height = y1 - y0
@@ -79,7 +79,7 @@ def make_source_icon() -> Image.Image:
     surface = (246, 247, 250, 255)
     draw.rounded_rectangle(card, radius=190, fill=surface)
     draw.rounded_rectangle((108, 108, 916, 916), radius=174, outline=(255, 255, 255, 165), width=4)
-    draw_voice_key(
+    draw_voice_mark(
         draw,
         (270, 270, 754, 754),
         color=(46, 123, 246, 255),

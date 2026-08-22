@@ -40,7 +40,7 @@ enum VoiceLauncherGlyphImage {
       NSBezierPath(roundedRect: rect, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
     }
 
-    image.isTemplate = false
+    image.isTemplate = true
     return image
   }
 }

@@ -1,320 +1,219 @@
-public struct VoiceInputRestoreConfiguration: Equatable, Sendable {
-  public let doubaoInputSourceTimeoutMilliseconds: Int
-  public let runningInputStartTimeoutMilliseconds: Int
-  public let restoreStabilityDelayMilliseconds: Int
+public enum VoiceSessionRecognitionPolicy {
+  public static let defaultWindowSeconds = 3.0
+  public static let minimumWindowSeconds = 0.0
+  public static let maximumWindowSeconds = 10.0
+  public static let windowStepSeconds = 0.1
+  public static let restoreStabilityDelayMilliseconds = 500
 
-  public init(
-    doubaoInputSourceTimeoutMilliseconds: Int = 2_000,
-    runningInputStartTimeoutMilliseconds: Int = 2_000,
-    restoreStabilityDelayMilliseconds: Int = 500
-  ) {
-    self.doubaoInputSourceTimeoutMilliseconds = max(0, doubaoInputSourceTimeoutMilliseconds)
-    self.runningInputStartTimeoutMilliseconds = max(0, runningInputStartTimeoutMilliseconds)
-    self.restoreStabilityDelayMilliseconds = max(0, restoreStabilityDelayMilliseconds)
+  public static func normalizedWindowSeconds(_ seconds: Double) -> Double {
+    min(max(seconds, minimumWindowSeconds), maximumWindowSeconds)
+  }
+
+  public static func windowMilliseconds(for seconds: Double) -> Int {
+    Int((normalizedWindowSeconds(seconds) * 1_000).rounded())
   }
 }
 
-public enum VoiceInputRestoreTimeoutReason: Equatable, Sendable {
-  case doubaoInputSource
-  case runningInputStart
+public enum VoiceInputRestoreDeadline: Equatable, Sendable {
+  case recognitionWindow
+  case restoreWindow
 }
 
 public enum VoiceInputRestoreSkippedReason: Equatable, Sendable {
-  case shortcutStartedFromDoubao
-  case shortcutObservedDuringActiveVoice
+  case returnedToOriginalBeforeVoice
+  case recognitionWindowExpired
   case originalInputSourceUnavailable
-  case currentInputSourceChangedBeforeRestore
-  case doubaoInputSourceTimedOut
-  case runningInputStartTimedOut
+  case alreadyAtOriginalInputSource
 }
 
 public enum VoiceInputRestoreAction: Equatable, Sendable {
-  case scheduleInputSourceChangeTimeout(delayMilliseconds: Int)
-  case scheduleRunningInputStartTimeout(delayMilliseconds: Int)
-  case scheduleRestore(
-    originalInputSourceID: String,
+  case scheduleDeadline(
+    VoiceInputRestoreDeadline,
     delayMilliseconds: Int
   )
-  case cancelRunningInputStartTimeout
+  case cancelDeadline
   case restoreInputSource(originalInputSourceID: String)
-  case skipRestore(reason: VoiceInputRestoreSkippedReason)
+  case skipRestore(
+    reason: VoiceInputRestoreSkippedReason,
+    originalInputSourceID: String?
+  )
 }
 
 public final class VoiceInputRestoreController {
-  public let configuration: VoiceInputRestoreConfiguration
-  private var state: State = .idle
+  private var currentInputSource: InputSourceIdentity?
+  private var session: Session?
 
-  public init(configuration: VoiceInputRestoreConfiguration = VoiceInputRestoreConfiguration()) {
-    self.configuration = configuration
-  }
+  public init() {}
 
   public var stateDescription: String {
-    state.description
+    session?.phase.description ?? "idle"
   }
 
   public var isIdle: Bool {
-    if case .idle = state {
-      return true
-    }
-    return false
+    session == nil
   }
 
   public var shouldObserveRunningInput: Bool {
-    switch state {
-    case .waitingForRunningInput, .voiceActive, .restoring:
-      return true
-    case .idle, .waitingForDoubao:
-      return false
-    }
+    session != nil
   }
 
   public var originalInputSourceID: String? {
-    state.originalInputSourceID
+    session?.originalInputSourceID
   }
 
-  public func reset() {
-    state = .idle
+  public func synchronizeCurrentInputSource(_ inputSource: InputSourceIdentity) {
+    currentInputSource = inputSource
+    session = nil
   }
 
-  public func shortcutObserved(
-    currentInputSource: InputSourceIdentity,
-    isDoubaoRunningInput: Bool = false,
-    elapsedMilliseconds: Int
+  public func currentInputSourceChanged(
+    to inputSource: InputSourceIdentity,
+    recognitionWindowMilliseconds: Int
   ) -> [VoiceInputRestoreAction] {
-    guard case .idle = state else {
+    let previousInputSource = currentInputSource
+    currentInputSource = inputSource
+
+    guard previousInputSource != inputSource else {
       return []
     }
 
-    guard !isDoubaoRunningInput else {
-      return [.skipRestore(reason: .shortcutObservedDuringActiveVoice)]
+    if var session {
+      guard session.phase == .candidate else {
+        return []
+      }
+
+      if inputSource.restorationID == session.originalInputSourceID {
+        self.session = nil
+        return [
+          .skipRestore(
+            reason: .returnedToOriginalBeforeVoice,
+            originalInputSourceID: session.originalInputSourceID
+          )
+        ]
+      }
+
+      if inputSource == .doubao {
+        session.reachedDoubao = true
+        self.session = session
+      }
+      return []
     }
 
-    guard currentInputSource != .doubao else {
-      return [.skipRestore(reason: .shortcutStartedFromDoubao)]
-    }
-
-    guard let originalInputSourceID = currentInputSource.restorationID,
+    guard let originalInputSourceID = previousInputSource?.restorationID,
           !originalInputSourceID.isEmpty else {
-      return [.skipRestore(reason: .originalInputSourceUnavailable)]
+      return []
     }
 
-    state = .waitingForDoubao(
+    session = Session(
       originalInputSourceID: originalInputSourceID,
-      observedElapsedMilliseconds: max(0, elapsedMilliseconds)
+      phase: .candidate,
+      reachedDoubao: inputSource == .doubao
     )
     return [
-      .scheduleInputSourceChangeTimeout(
-        delayMilliseconds: configuration.doubaoInputSourceTimeoutMilliseconds
+      .scheduleDeadline(
+        .recognitionWindow,
+        delayMilliseconds: max(0, recognitionWindowMilliseconds)
       )
     ]
   }
 
-  public func currentInputSourceChanged(
-    to currentInputSource: InputSourceIdentity,
-    elapsedMilliseconds: Int
-  ) -> [VoiceInputRestoreAction] {
-    switch state {
-    case .idle:
-      return []
-    case let .waitingForDoubao(originalInputSourceID, observedElapsedMilliseconds):
-      guard currentInputSource == .doubao else {
-        return []
-      }
-      state = .waitingForRunningInput(
-        originalInputSourceID: originalInputSourceID,
-        observedElapsedMilliseconds: observedElapsedMilliseconds,
-        doubaoSelectedElapsedMilliseconds: max(0, elapsedMilliseconds)
-      )
-      return [
-        .scheduleRunningInputStartTimeout(
-          delayMilliseconds: configuration.runningInputStartTimeoutMilliseconds
-        )
-      ]
-    case .waitingForRunningInput:
-      return []
-    case .voiceActive:
-      return []
-    case .restoring:
-      guard currentInputSource != .doubao else {
-        return []
-      }
-      state = .idle
-      return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
-    }
-  }
-
   public func runningInputChanged(
-    isRunningInput: Bool,
-    currentInputSource: InputSourceIdentity,
-    elapsedMilliseconds: Int
+    isRunningInput: Bool
   ) -> [VoiceInputRestoreAction] {
-    switch state {
-    case let .waitingForRunningInput(
-      originalInputSourceID,
-      observedElapsedMilliseconds,
-      doubaoSelectedElapsedMilliseconds
-    ):
-      guard isRunningInput else {
+    guard var session else {
+      return []
+    }
+
+    switch session.phase {
+    case .candidate:
+      guard isRunningInput, session.reachedDoubao else {
         return []
       }
-      state = .voiceActive(
-        originalInputSourceID: originalInputSourceID,
-        observedElapsedMilliseconds: observedElapsedMilliseconds,
-        doubaoSelectedElapsedMilliseconds: doubaoSelectedElapsedMilliseconds,
-        runningInputStartedElapsedMilliseconds: max(0, elapsedMilliseconds)
-      )
-      return [.cancelRunningInputStartTimeout]
-    case let .voiceActive(
-      originalInputSourceID,
-      observedElapsedMilliseconds,
-      doubaoSelectedElapsedMilliseconds,
-      runningInputStartedElapsedMilliseconds
-    ):
-      guard currentInputSource == .doubao else {
-        state = .idle
-        return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
-      }
+      session.phase = .voiceActive
+      self.session = session
+      return [.cancelDeadline]
+    case .voiceActive:
       guard !isRunningInput else {
         return []
       }
-      state = .restoring(
-        originalInputSourceID: originalInputSourceID,
-        observedElapsedMilliseconds: observedElapsedMilliseconds,
-        doubaoSelectedElapsedMilliseconds: doubaoSelectedElapsedMilliseconds,
-        runningInputStartedElapsedMilliseconds: runningInputStartedElapsedMilliseconds,
-        runningInputStoppedElapsedMilliseconds: max(0, elapsedMilliseconds)
-      )
+      session.phase = .restoring
+      self.session = session
       return [
-        .scheduleRestore(
-          originalInputSourceID: originalInputSourceID,
-          delayMilliseconds: configuration.restoreStabilityDelayMilliseconds
+        .scheduleDeadline(
+          .restoreWindow,
+          delayMilliseconds: VoiceSessionRecognitionPolicy.restoreStabilityDelayMilliseconds
         )
       ]
-    case let .restoring(
-      originalInputSourceID,
-      observedElapsedMilliseconds,
-      doubaoSelectedElapsedMilliseconds,
-      runningInputStartedElapsedMilliseconds,
-      _
-    ):
-      guard currentInputSource == .doubao else {
-        state = .idle
-        return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
-      }
+    case .restoring:
       guard isRunningInput else {
         return []
       }
-      state = .voiceActive(
-        originalInputSourceID: originalInputSourceID,
-        observedElapsedMilliseconds: observedElapsedMilliseconds,
-        doubaoSelectedElapsedMilliseconds: doubaoSelectedElapsedMilliseconds,
-        runningInputStartedElapsedMilliseconds: runningInputStartedElapsedMilliseconds
-      )
-      return []
-    case .idle, .waitingForDoubao:
-      return []
+      session.phase = .voiceActive
+      self.session = session
+      return [.cancelDeadline]
     }
   }
 
-  public func timeoutElapsed(
-    reason: VoiceInputRestoreTimeoutReason,
-    elapsedMilliseconds: Int
+  public func deadlineElapsed(
+    _ deadline: VoiceInputRestoreDeadline,
+    isOriginalInputSourceAvailable: Bool = true
   ) -> [VoiceInputRestoreAction] {
-    switch (state, reason) {
-    case (.waitingForDoubao, .doubaoInputSource):
-      state = .idle
-      return [.skipRestore(reason: .doubaoInputSourceTimedOut)]
-    case (.waitingForRunningInput, .runningInputStart):
-      state = .idle
-      return [.skipRestore(reason: .runningInputStartTimedOut)]
+    guard let session else {
+      return []
+    }
+
+    switch (session.phase, deadline) {
+    case (.candidate, .recognitionWindow):
+      self.session = nil
+      return [
+        .skipRestore(
+          reason: .recognitionWindowExpired,
+          originalInputSourceID: session.originalInputSourceID
+        )
+      ]
+    case (.restoring, .restoreWindow):
+      self.session = nil
+
+      guard isOriginalInputSourceAvailable else {
+        return [
+          .skipRestore(
+            reason: .originalInputSourceUnavailable,
+            originalInputSourceID: session.originalInputSourceID
+          )
+        ]
+      }
+
+      if currentInputSource?.restorationID == session.originalInputSourceID {
+        return [
+          .skipRestore(
+            reason: .alreadyAtOriginalInputSource,
+            originalInputSourceID: session.originalInputSourceID
+          )
+        ]
+      }
+
+      return [.restoreInputSource(originalInputSourceID: session.originalInputSourceID)]
     default:
       return []
     }
   }
-
-  public func restoreWindowElapsed(
-    currentInputSource: InputSourceIdentity,
-    isOriginalInputSourceAvailable: Bool,
-    elapsedMilliseconds: Int
-  ) -> [VoiceInputRestoreAction] {
-    guard case let .restoring(
-      originalInputSourceID,
-      _,
-      _,
-      _,
-      runningInputStoppedElapsedMilliseconds
-    ) = state else {
-      return []
-    }
-
-    guard currentInputSource == .doubao else {
-      state = .idle
-      return [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)]
-    }
-
-    guard isOriginalInputSourceAvailable else {
-      state = .idle
-      return [.skipRestore(reason: .originalInputSourceUnavailable)]
-    }
-
-    let restoreElapsedMilliseconds = max(
-      0,
-      elapsedMilliseconds - runningInputStoppedElapsedMilliseconds
-    )
-    guard restoreElapsedMilliseconds >= configuration.restoreStabilityDelayMilliseconds else {
-      return []
-    }
-
-    state = .idle
-    return [.restoreInputSource(originalInputSourceID: originalInputSourceID)]
-  }
 }
 
-private enum State {
-  case idle
-  case waitingForDoubao(
-    originalInputSourceID: String,
-    observedElapsedMilliseconds: Int
-  )
-  case waitingForRunningInput(
-    originalInputSourceID: String,
-    observedElapsedMilliseconds: Int,
-    doubaoSelectedElapsedMilliseconds: Int
-  )
-  case voiceActive(
-    originalInputSourceID: String,
-    observedElapsedMilliseconds: Int,
-    doubaoSelectedElapsedMilliseconds: Int,
-    runningInputStartedElapsedMilliseconds: Int
-  )
-  case restoring(
-    originalInputSourceID: String,
-    observedElapsedMilliseconds: Int,
-    doubaoSelectedElapsedMilliseconds: Int,
-    runningInputStartedElapsedMilliseconds: Int,
-    runningInputStoppedElapsedMilliseconds: Int
-  )
+private struct Session {
+  let originalInputSourceID: String
+  var phase: Phase
+  var reachedDoubao: Bool
+}
 
-  var originalInputSourceID: String? {
-    switch self {
-    case .idle:
-      return nil
-    case let .waitingForDoubao(originalInputSourceID, _),
-         let .waitingForRunningInput(originalInputSourceID, _, _),
-         let .voiceActive(originalInputSourceID, _, _, _),
-         let .restoring(originalInputSourceID, _, _, _, _):
-      return originalInputSourceID
-    }
-  }
+private enum Phase: Equatable {
+  case candidate
+  case voiceActive
+  case restoring
 
   var description: String {
     switch self {
-    case .idle:
-      return "idle"
-    case .waitingForDoubao:
-      return "waitingForDoubao"
-    case .waitingForRunningInput:
-      return "waitingForRunningInput"
+    case .candidate:
+      return "candidate"
     case .voiceActive:
       return "voiceActive"
     case .restoring:

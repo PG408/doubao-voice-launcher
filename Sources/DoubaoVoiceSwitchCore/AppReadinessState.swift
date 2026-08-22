@@ -5,30 +5,22 @@ public enum AppStatus: Equatable {
 }
 
 public struct AppReadinessState: Equatable {
-  private var accessibilityTrusted: Bool
   private var doubaoInputSourceAvailable: Bool
   private var userPaused: Bool
 
   public init(
-    accessibilityTrusted: Bool = false,
     doubaoInputSourceAvailable: Bool = false,
     userPaused: Bool = false
   ) {
-    self.accessibilityTrusted = accessibilityTrusted
     self.doubaoInputSourceAvailable = doubaoInputSourceAvailable
     self.userPaused = userPaused
   }
 
   public var status: AppStatus {
-    guard accessibilityTrusted && doubaoInputSourceAvailable else {
+    guard doubaoInputSourceAvailable else {
       return .preparing
     }
-
     return userPaused ? .paused : .running
-  }
-
-  public mutating func setAccessibilityTrusted(_ isTrusted: Bool) {
-    accessibilityTrusted = isTrusted
   }
 
   public mutating func setDoubaoInputSourceAvailable(_ isAvailable: Bool) {

@@ -6,634 +6,282 @@ struct TestFailure: Error, CustomStringConvertible {
 }
 
 func expectEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String) throws {
-  if actual != expected {
+  guard actual == expected else {
     throw TestFailure(description: "\(message): expected \(expected), got \(actual)")
   }
 }
 
-func testStartsPreparing() throws {
-  let state = AppReadinessState()
-  try expectEqual(state.status, .preparing, "启动时应进入准备中")
-}
-
-func testBecomesRunningWhenRequiredPrerequisitesAreReady() throws {
+func testReadinessRequiresOnlyDoubaoInputSource() throws {
   var state = AppReadinessState()
-  state.setAccessibilityTrusted(true)
+  try expectEqual(state.status, .preparing, "未检测到豆包输入法时应准备中")
+
   state.setDoubaoInputSourceAvailable(true)
-  try expectEqual(state.status, .running, "辅助功能和豆包输入法满足后应进入运行中")
-}
+  try expectEqual(state.status, .running, "检测到豆包输入法后应运行")
 
-func testPauseAndResume() throws {
-  var state = AppReadinessState(accessibilityTrusted: true, doubaoInputSourceAvailable: true)
   state.pause()
-  try expectEqual(state.status, .paused, "暂停后应进入暂停中")
+  try expectEqual(state.status, .paused, "用户暂停后应暂停")
+
   state.resume()
-  try expectEqual(state.status, .running, "继续后应回到运行中")
+  try expectEqual(state.status, .running, "用户继续后应恢复运行")
 }
 
-func testMissingPrerequisiteOverridesPausedStatus() throws {
-  var state = AppReadinessState(accessibilityTrusted: true, doubaoInputSourceAvailable: true)
-  state.pause()
-  state.setAccessibilityTrusted(false)
-  try expectEqual(state.status, .preparing, "前置条件缺失时应显示准备中")
-  state.setAccessibilityTrusted(true)
-  try expectEqual(state.status, .paused, "前置条件恢复后仍应保持用户暂停")
-}
-
-func testRemainsPreparingWhenAnyRequiredPrerequisiteIsMissing() throws {
-  var state = AppReadinessState(accessibilityTrusted: true, doubaoInputSourceAvailable: true)
-  state.setDoubaoInputSourceAvailable(false)
-  try expectEqual(state.status, .preparing, "必要前置条件缺失时应保持准备中")
-}
-
-func testDoubaoShortcutDisplaysSelectedPhysicalKeysInStableOrder() throws {
-  let shortcut = DoubaoShortcut(keys: [.rightCommand, .function, .leftControl])
-  try expectEqual(shortcut.displayText, "L⌃ + R⌘ + Fn", "豆包快捷键应按稳定顺序显示已选择物理键")
-}
-
-func testDoubaoShortcutRejectsEmptySelection() throws {
-  let shortcut = DoubaoShortcut(keys: [])
-  try expectEqual(shortcut.keys, [.rightCommand], "豆包快捷键为空时应回退到默认右 Command")
-}
-
-func testDoubaoShortcutMatchesOnlyExactSelectedKeySet() throws {
-  let shortcut = DoubaoShortcut(keys: [.rightCommand, .function])
-
+func testRecognitionWindowPolicy() throws {
   try expectEqual(
-    shortcut.matches(activeKeys: [.rightCommand, .function]),
-    true,
-    "豆包快捷键应匹配完全一致的物理键集合"
+    VoiceSessionRecognitionPolicy.windowMilliseconds(for: -0.1),
+    0,
+    "识别窗口不得小于零秒"
   )
   try expectEqual(
-    shortcut.matches(activeKeys: [.leftCommand, .function]),
-    false,
-    "豆包快捷键不应把左 Command 当成右 Command"
+    VoiceSessionRecognitionPolicy.windowMilliseconds(for: 0.5),
+    500,
+    "识别窗口应支持一秒以内的小数"
   )
   try expectEqual(
-    shortcut.matches(activeKeys: [.rightCommand]),
-    false,
-    "豆包快捷键不应匹配缺失按键的集合"
+    VoiceSessionRecognitionPolicy.windowMilliseconds(for: 2.3),
+    2_300,
+    "识别窗口应准确换算一位小数"
   )
   try expectEqual(
-    shortcut.matches(activeKeys: [.rightCommand, .function, .leftOption]),
-    false,
-    "豆包快捷键不应匹配额外按键的集合"
+    VoiceSessionRecognitionPolicy.windowMilliseconds(for: 12),
+    10_000,
+    "识别窗口不得长于十秒"
   )
 }
 
-func testDoubaoShortcutRoundTripsStorageValue() throws {
-  let shortcut = DoubaoShortcut(keys: [.leftOption, .rightCommand, .function])
-  let restored = DoubaoShortcut(storageValue: shortcut.storageValue)
-  try expectEqual(restored, shortcut, "豆包快捷键应能从持久化字符串恢复")
-}
-
-func testShortcutPressObserverIgnoresUnconfiguredBridgeModifiers() throws {
-  var observer = ShortcutPressObserver(shortcut: DoubaoShortcut(keys: [.rightCommand]))
-
-  try expectEqual(
-    observer.observe(
-      key: .rightCommand,
-      activeModifiers: [.command],
-      isFunctionActive: false
-    ),
-    true,
-    "右 Command 按下时应观察到一次配置快捷键"
-  )
-  try expectEqual(
-    observer.observe(
-      key: .leftControl,
-      activeModifiers: [.control, .command],
-      isFunctionActive: false
-    ),
-    false,
-    "豆包桥接产生的非配置 Control 不应改变快捷键观察状态"
-  )
-  try expectEqual(
-    observer.observe(
-      key: .rightCommand,
-      activeModifiers: [],
-      isFunctionActive: false
-    ),
-    false,
-    "右 Command 松开时不应产生新的快捷键观察"
-  )
-  try expectEqual(
-    observer.observe(
-      key: .rightCommand,
-      activeModifiers: [.command],
-      isFunctionActive: false
-    ),
-    true,
-    "完整松开后再次按下右 Command 应产生新的快捷键观察"
-  )
-}
-
-func testShortcutPressObserverRejectsExtraPhysicalModifiers() throws {
-  var observer = ShortcutPressObserver(shortcut: DoubaoShortcut(keys: [.rightCommand]))
-
-  _ = observer.observe(
-    key: .leftControl,
-    activeModifiers: [.control],
-    isFunctionActive: false
-  )
-  try expectEqual(
-    observer.observe(
-      key: .rightCommand,
-      activeModifiers: [.control, .command],
-      isFunctionActive: false
-    ),
-    false,
-    "存在额外物理修饰键时不得匹配右 Command 单键快捷键"
-  )
-}
-
-func testShortcutPressObserverResetClearsIncompletePress() throws {
-  var observer = ShortcutPressObserver(shortcut: DoubaoShortcut(keys: [.rightCommand]))
-
-  _ = observer.observe(
-    key: .rightCommand,
-    activeModifiers: [.command],
-    isFunctionActive: false
-  )
-  observer.reset()
-  try expectEqual(
-    observer.observe(
-      key: .rightCommand,
-      activeModifiers: [.command],
-      isFunctionActive: false
-    ),
-    true,
-    "event tap 恢复后应从干净状态识别下一次快捷键"
-  )
-}
-
-func testDefaultDoubaoInputSourceTimeoutIsTwoSeconds() throws {
+func testInitialInputSourceOnlyEstablishesBaseline() throws {
   let controller = VoiceInputRestoreController()
 
-  try expectEqual(
-    controller.shortcutObserved(
-      currentInputSource: .other("com.sogou.inputmethod.sogou.pinyin"),
-      elapsedMilliseconds: 0
-    ),
-    [.scheduleInputSourceChangeTimeout(delayMilliseconds: 2_000)],
-    "默认应等待豆包输入法两秒后再超时"
-  )
+  controller.synchronizeCurrentInputSource(.other("com.sogou.inputmethod.sogou.pinyin"))
+
+  try expectEqual(controller.stateDescription, "idle", "初始输入法不得创建候选会话")
+  try expectEqual(controller.shouldObserveRunningInput, false, "空闲时不得探测语音状态")
 }
 
-func testDefaultRunningInputStartTimeoutIsTwoSeconds() throws {
+func testLeavingInputSourceStartsRecognitionWindow() throws {
   let controller = VoiceInputRestoreController()
-
-  _ = controller.shortcutObserved(
-    currentInputSource: .other("com.sogou.inputmethod.sogou.pinyin"),
-    elapsedMilliseconds: 0
-  )
-  try expectEqual(
-    controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 200),
-    [.scheduleRunningInputStartTimeout(delayMilliseconds: 2_000)],
-    "切到豆包后默认应等待 runningInput 两秒"
-  )
-}
-
-func testShortcutDuringExistingVoiceDoesNotStartRestoreChain() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  try expectEqual(
-    controller.shortcutObserved(
-      currentInputSource: .other("com.sogou.inputmethod.sogou.pinyin"),
-      isDoubaoRunningInput: true,
-      elapsedMilliseconds: 0
-    ),
-    [.skipRestore(reason: .shortcutObservedDuringActiveVoice)],
-    "豆包旧语音仍活动时的快捷键只应停止旧语音，不得创建新链路"
-  )
-  try expectEqual(controller.stateDescription, "idle", "停止旧语音的快捷键不应改变空闲状态")
-}
-
-func testObservedShortcutFromOtherInputSourceRestoresAfterRunningInputStops() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-  let originalInputSourceID = "com.apple.inputmethod.SCIM.ITABC"
-
-  try expectEqual(
-    controller.shortcutObserved(currentInputSource: .other(originalInputSourceID), elapsedMilliseconds: 0),
-    [.scheduleInputSourceChangeTimeout(delayMilliseconds: 1_000)],
-    "非豆包输入法下观察到快捷键后，只应等待豆包自己切换输入法"
-  )
-  try expectEqual(controller.stateDescription, "waitingForDoubao", "观察快捷键后应等待切换到豆包输入法")
-
-  try expectEqual(
-    controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 120),
-    [.scheduleRunningInputStartTimeout(delayMilliseconds: 1_500)],
-    "切到豆包后应等待 runningInput=true"
-  )
-  try expectEqual(controller.stateDescription, "waitingForRunningInput", "切到豆包后应等待语音输入开始")
-
-  try expectEqual(
-    controller.runningInputChanged(isRunningInput: true, currentInputSource: .doubao, elapsedMilliseconds: 320),
-    [.cancelRunningInputStartTimeout],
-    "runningInput=true 后应取消语音启动超时，不应继续保留无效定时器"
-  )
-  try expectEqual(controller.stateDescription, "voiceActive", "runningInput=true 后应进入语音活动状态")
-
-  try expectEqual(
-    controller.runningInputChanged(isRunningInput: false, currentInputSource: .doubao, elapsedMilliseconds: 820),
-    [
-      .scheduleRestore(
-        originalInputSourceID: originalInputSourceID,
-        delayMilliseconds: 500
-      )
-    ],
-    "runningInput=false 后应安排稳定期恢复"
-  )
-  try expectEqual(controller.stateDescription, "restoring", "runningInput=false 后应进入恢复等待状态")
-
-  try expectEqual(
-    controller.restoreWindowElapsed(
-      currentInputSource: .doubao,
-      isOriginalInputSourceAvailable: true,
-      elapsedMilliseconds: 1_320
-    ),
-    [.restoreInputSource(originalInputSourceID: originalInputSourceID)],
-    "稳定期后若当前仍为豆包，应恢复快捷键发生前的原输入法"
-  )
-  try expectEqual(controller.stateDescription, "idle", "恢复决策完成后应回到 idle")
-}
-
-func testRepeatedShortcutDuringStartupPreservesOriginalInputSource() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
   let originalInputSourceID = "com.sogou.inputmethod.sogou.pinyin"
-
-  _ = controller.shortcutObserved(
-    currentInputSource: .other(originalInputSourceID),
-    elapsedMilliseconds: 0
-  )
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 120)
+  controller.synchronizeCurrentInputSource(.other(originalInputSourceID))
 
   try expectEqual(
-    controller.shortcutObserved(currentInputSource: .doubao, elapsedMilliseconds: 180),
-    [],
-    "语音启动期间的重复快捷键不得重启或清除恢复链路"
-  )
-  try expectEqual(
-    controller.originalInputSourceID,
-    originalInputSourceID,
-    "重复快捷键不得覆盖最初记录的原输入法"
-  )
-
-  _ = controller.runningInputChanged(
-    isRunningInput: true,
-    currentInputSource: .doubao,
-    elapsedMilliseconds: 220
-  )
-  try expectEqual(
-    controller.runningInputChanged(
-      isRunningInput: false,
-      currentInputSource: .doubao,
-      elapsedMilliseconds: 260
+    controller.currentInputSourceChanged(
+      to: .other("com.apple.keylayout.ABC"),
+      recognitionWindowMilliseconds: 3_000
     ),
-    [
-      .scheduleRestore(
-        originalInputSourceID: originalInputSourceID,
-        delayMilliseconds: 500
-      )
-    ],
-    "重复快捷键结束短语音后仍应恢复最初输入法"
+    [.scheduleDeadline(.recognitionWindow, delayMilliseconds: 3_000)],
+    "离开原输入法后应开启一个识别窗口"
   )
+  try expectEqual(controller.originalInputSourceID, originalInputSourceID, "应冻结开始时的输入法")
+  try expectEqual(controller.stateDescription, "candidate", "应进入候选会话")
+  try expectEqual(controller.shouldObserveRunningInput, true, "候选会话应开始探测语音状态")
 }
 
-func testRunningInputObservationStartsOnlyAfterDoubaoSelection() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  try expectEqual(controller.shouldObserveRunningInput, false, "空闲状态不得探测 runningInput")
-  _ = controller.shortcutObserved(
-    currentInputSource: .other("com.sogou.inputmethod.sogou.pinyin"),
-    elapsedMilliseconds: 0
-  )
-  try expectEqual(
-    controller.shouldObserveRunningInput,
-    false,
-    "等待豆包切换输入法期间不得探测 runningInput"
-  )
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 120)
-  try expectEqual(
-    controller.shouldObserveRunningInput,
-    true,
-    "观察到豆包输入法后才应开始探测 runningInput"
-  )
-  _ = controller.timeoutElapsed(reason: .runningInputStart, elapsedMilliseconds: 1_700)
-  try expectEqual(controller.shouldObserveRunningInput, false, "链路超时回到空闲后应停止探测 runningInput")
-}
-
-func testShortcutFromDoubaoInputSourceDoesNotRestore() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  try expectEqual(
-    controller.shortcutObserved(currentInputSource: .doubao, elapsedMilliseconds: 0),
-    [.skipRestore(reason: .shortcutStartedFromDoubao)],
-    "用户本来就在豆包输入法时按快捷键不得恢复"
-  )
-  try expectEqual(controller.stateDescription, "idle", "豆包输入法内触发不应创建链路")
-}
-
-func testManualSwitchToDoubaoWithoutShortcutDoesNotRestore() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  try expectEqual(
-    controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 200),
-    [],
-    "未先观察到快捷键时，手动切到豆包不得恢复"
-  )
-  try expectEqual(controller.stateDescription, "idle", "手动切换不得创建恢复链路")
-}
-
-func testRunningInputNeverStartsBeforeTimeoutDoesNotRestore() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  _ = controller.shortcutObserved(currentInputSource: .other("com.apple.inputmethod.SCIM.ITABC"), elapsedMilliseconds: 0)
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 100)
-  try expectEqual(
-    controller.runningInputChanged(isRunningInput: false, currentInputSource: .doubao, elapsedMilliseconds: 400),
-    [],
-    "切到豆包后 runningInput 从未为 true 时不得恢复"
-  )
-  try expectEqual(
-    controller.timeoutElapsed(reason: .runningInputStart, elapsedMilliseconds: 1_600),
-    [.skipRestore(reason: .runningInputStartTimedOut)],
-    "切到豆包后超时未进入 runningInput=true 应放弃"
-  )
-  try expectEqual(controller.stateDescription, "idle", "runningInput 超时后应回到 idle")
-}
-
-func testTransientInputSourceDuringRunningInputWaitDoesNotLoseOriginalSource() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
+func testIntermediateInputSourcesDoNotReplaceOriginal() throws {
+  let controller = VoiceInputRestoreController()
   let originalInputSourceID = "com.sogou.inputmethod.sogou.pinyin"
+  controller.synchronizeCurrentInputSource(.other(originalInputSourceID))
 
-  _ = controller.shortcutObserved(currentInputSource: .other(originalInputSourceID), elapsedMilliseconds: 0)
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 180)
+  _ = controller.currentInputSourceChanged(
+    to: .other("com.apple.keylayout.ABC"),
+    recognitionWindowMilliseconds: 3_000
+  )
+  _ = controller.currentInputSourceChanged(
+    to: .other("com.apple.inputmethod.SCIM.ITABC"),
+    recognitionWindowMilliseconds: 3_000
+  )
+  _ = controller.currentInputSourceChanged(to: .doubao, recognitionWindowMilliseconds: 3_000)
 
+  try expectEqual(controller.originalInputSourceID, originalInputSourceID, "中间输入法不得覆盖起点")
   try expectEqual(
-    controller.currentInputSourceChanged(to: .other("com.apple.keylayout.ABC"), elapsedMilliseconds: 520),
-    [],
-    "等待 runningInput=true 期间短暂切到 ABC 不应放弃恢复链路"
+    controller.runningInputChanged(isRunningInput: true),
+    [.cancelDeadline],
+    "到达豆包并启动语音后应确认会话"
   )
-  try expectEqual(
-    controller.stateDescription,
-    "waitingForRunningInput",
-    "短暂输入法抖动后仍应等待 runningInput=true"
-  )
-  try expectEqual(
-    controller.originalInputSourceID,
-    originalInputSourceID,
-    "原输入法应保持为快捷键发生前记录的输入法"
-  )
-
-  try expectEqual(
-    controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 620),
-    [],
-    "短暂输入法抖动后回到豆包不应重新开始链路"
-  )
-  _ = controller.runningInputChanged(isRunningInput: true, currentInputSource: .doubao, elapsedMilliseconds: 760)
-  _ = controller.runningInputChanged(isRunningInput: false, currentInputSource: .doubao, elapsedMilliseconds: 1_200)
-
-  try expectEqual(
-    controller.restoreWindowElapsed(
-      currentInputSource: .doubao,
-      isOriginalInputSourceAvailable: true,
-      elapsedMilliseconds: 1_800
-    ),
-    [.restoreInputSource(originalInputSourceID: originalInputSourceID)],
-    "语音结束后应恢复到最初记录的原输入法，而不是中途经过的 ABC"
-  )
+  try expectEqual(controller.stateDescription, "voiceActive", "应进入语音活动状态")
 }
 
-func testTransientInputSourceStillTimesOutWhenRunningInputNeverStarts() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  _ = controller.shortcutObserved(currentInputSource: .other("com.sogou.inputmethod.sogou.pinyin"), elapsedMilliseconds: 0)
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 180)
-  _ = controller.currentInputSourceChanged(to: .other("com.apple.keylayout.ABC"), elapsedMilliseconds: 520)
-
-  try expectEqual(
-    controller.timeoutElapsed(reason: .runningInputStart, elapsedMilliseconds: 1_700),
-    [.skipRestore(reason: .runningInputStartTimedOut)],
-    "短暂输入法抖动后若 runningInput 从未为 true，仍应按超时放弃"
+func testReturningToOriginalCancelsCandidate() throws {
+  let controller = VoiceInputRestoreController()
+  let originalInputSourceID = "com.sogou.inputmethod.sogou.pinyin"
+  controller.synchronizeCurrentInputSource(.other(originalInputSourceID))
+  _ = controller.currentInputSourceChanged(
+    to: .other("com.apple.keylayout.ABC"),
+    recognitionWindowMilliseconds: 3_000
   )
-  try expectEqual(controller.stateDescription, "idle", "runningInput 超时后应回到 idle")
-}
-
-func testVoiceKeepsTrackingAcrossTransientInputSourceChange() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-  let originalInputSource = InputSourceIdentity.other("com.sogou.inputmethod.sogou.pinyin")
-
-  _ = controller.shortcutObserved(currentInputSource: originalInputSource, elapsedMilliseconds: 0)
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 100)
-  _ = controller.runningInputChanged(isRunningInput: true, currentInputSource: .doubao, elapsedMilliseconds: 300)
 
   try expectEqual(
-    controller.currentInputSourceChanged(to: originalInputSource, elapsedMilliseconds: 600),
-    [],
-    "语音活动期间输入法短暂离开豆包时应继续追踪"
-  )
-  try expectEqual(controller.stateDescription, "voiceActive", "输入法抖动后应保持语音活动状态")
-  try expectEqual(controller.shouldObserveRunningInput, true, "输入法抖动后应继续采样 runningInput")
-
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 800)
-  try expectEqual(
-    controller.runningInputChanged(
-      isRunningInput: false,
-      currentInputSource: .doubao,
-      elapsedMilliseconds: 1_000
+    controller.currentInputSourceChanged(
+      to: .other(originalInputSourceID),
+      recognitionWindowMilliseconds: 3_000
     ),
     [
-      .scheduleRestore(
-        originalInputSourceID: "com.sogou.inputmethod.sogou.pinyin",
-        delayMilliseconds: 500
+      .skipRestore(
+        reason: .returnedToOriginalBeforeVoice,
+        originalInputSourceID: originalInputSourceID
       )
     ],
-    "输入法回到豆包后语音结束应正常安排恢复"
+    "确认语音前返回起点应取消候选会话"
   )
+  try expectEqual(controller.stateDescription, "idle", "取消后应回到空闲")
 }
 
-func testRunningInputAfterSourceRollbackKeepsRestoreChain() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-  let originalInputSource = InputSourceIdentity.other("com.sogou.inputmethod.sogou.pinyin")
-
-  _ = controller.shortcutObserved(currentInputSource: originalInputSource, elapsedMilliseconds: 0)
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 100)
-  _ = controller.currentInputSourceChanged(to: originalInputSource, elapsedMilliseconds: 500)
-
-  try expectEqual(
-    controller.runningInputChanged(
-      isRunningInput: true,
-      currentInputSource: originalInputSource,
-      elapsedMilliseconds: 1_600
-    ),
-    [.cancelRunningInputStartTimeout],
-    "runningInput=true 应确认语音开始，不应受瞬时输入法变化影响"
+func testRunningInputRequiresDoubaoDuringWindow() throws {
+  let controller = VoiceInputRestoreController()
+  controller.synchronizeCurrentInputSource(.other("com.sogou.inputmethod.sogou.pinyin"))
+  _ = controller.currentInputSourceChanged(
+    to: .other("com.apple.keylayout.ABC"),
+    recognitionWindowMilliseconds: 3_000
   )
-  try expectEqual(controller.stateDescription, "voiceActive", "确认语音开始后应进入 voiceActive")
-  try expectEqual(controller.shouldObserveRunningInput, true, "确认语音开始后应继续采样 runningInput")
 
   try expectEqual(
-    controller.runningInputChanged(
-      isRunningInput: false,
-      currentInputSource: originalInputSource,
-      elapsedMilliseconds: 2_000
-    ),
-    [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)],
-    "语音结束时当前已是原输入法则不得再次恢复"
-  )
-  try expectEqual(controller.stateDescription, "idle", "无需恢复时应回到 idle")
-}
-
-func testRestoreWaitsForStabilityDelay() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  _ = controller.shortcutObserved(currentInputSource: .other("com.apple.keylayout.ABC"), elapsedMilliseconds: 0)
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 100)
-  _ = controller.runningInputChanged(isRunningInput: true, currentInputSource: .doubao, elapsedMilliseconds: 200)
-  _ = controller.runningInputChanged(isRunningInput: false, currentInputSource: .doubao, elapsedMilliseconds: 500)
-
-  try expectEqual(
-    controller.restoreWindowElapsed(
-      currentInputSource: .doubao,
-      isOriginalInputSourceAvailable: true,
-      elapsedMilliseconds: 900
-    ),
+    controller.runningInputChanged(isRunningInput: true),
     [],
-    "runningInput=false 后稳定期未到时不得恢复"
+    "尚未到达豆包时不得确认语音会话"
   )
-  try expectEqual(controller.stateDescription, "restoring", "稳定期未到应继续保持 restoring")
+  try expectEqual(controller.stateDescription, "candidate", "应继续等待豆包")
 }
 
-func testUserSwitchesAwayBeforeRestoreDoesNotRestore() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  _ = controller.shortcutObserved(currentInputSource: .other("com.apple.keylayout.ABC"), elapsedMilliseconds: 0)
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 100)
-  _ = controller.runningInputChanged(isRunningInput: true, currentInputSource: .doubao, elapsedMilliseconds: 200)
-  _ = controller.runningInputChanged(isRunningInput: false, currentInputSource: .doubao, elapsedMilliseconds: 500)
+func testRecognitionWindowExpiryDoesNotRestore() throws {
+  let controller = VoiceInputRestoreController()
+  let originalInputSourceID = "com.apple.keylayout.ABC"
+  controller.synchronizeCurrentInputSource(.other(originalInputSourceID))
+  _ = controller.currentInputSourceChanged(to: .doubao, recognitionWindowMilliseconds: 3_000)
 
   try expectEqual(
-    controller.restoreWindowElapsed(
-      currentInputSource: .other("com.apple.inputmethod.SCIM.ITABC"),
-      isOriginalInputSourceAvailable: true,
-      elapsedMilliseconds: 1_000
+    controller.deadlineElapsed(.recognitionWindow),
+    [
+      .skipRestore(
+        reason: .recognitionWindowExpired,
+        originalInputSourceID: originalInputSourceID
+      )
+    ],
+    "窗口内没有启动语音时不得恢复"
+  )
+  try expectEqual(controller.stateDescription, "idle", "窗口超时后应回到空闲")
+}
+
+func testVoiceEndSchedulesStableRestore() throws {
+  let controller = confirmedVoiceController()
+
+  try expectEqual(
+    controller.runningInputChanged(isRunningInput: false),
+    [
+      .scheduleDeadline(
+        .restoreWindow,
+        delayMilliseconds: VoiceSessionRecognitionPolicy.restoreStabilityDelayMilliseconds
+      )
+    ],
+    "语音结束后应等待稳定期"
+  )
+  try expectEqual(controller.stateDescription, "restoring", "应进入恢复等待状态")
+}
+
+func testVoiceRestartCancelsPendingRestore() throws {
+  let controller = confirmedVoiceController()
+  _ = controller.runningInputChanged(isRunningInput: false)
+
+  try expectEqual(
+    controller.runningInputChanged(isRunningInput: true),
+    [.cancelDeadline],
+    "稳定期内语音重新开始时应取消恢复"
+  )
+  try expectEqual(controller.stateDescription, "voiceActive", "应继续跟踪同一语音会话")
+}
+
+func testConfirmedVoiceAlwaysRestoresOriginal() throws {
+  let controller = confirmedVoiceController()
+  let originalInputSourceID = "com.sogou.inputmethod.sogou.pinyin"
+  _ = controller.currentInputSourceChanged(
+    to: .other("com.apple.inputmethod.SCIM.ITABC"),
+    recognitionWindowMilliseconds: 3_000
+  )
+  _ = controller.runningInputChanged(isRunningInput: false)
+
+  try expectEqual(
+    controller.deadlineElapsed(.restoreWindow),
+    [.restoreInputSource(originalInputSourceID: originalInputSourceID)],
+    "确认的语音会话结束后应恢复起点，不判断中途输入法"
+  )
+  try expectEqual(controller.stateDescription, "idle", "恢复决策完成后应回到空闲")
+}
+
+func testAlreadyAtOriginalSkipsSelection() throws {
+  let controller = confirmedVoiceController()
+  let originalInputSourceID = "com.sogou.inputmethod.sogou.pinyin"
+  _ = controller.currentInputSourceChanged(
+    to: .other(originalInputSourceID),
+    recognitionWindowMilliseconds: 3_000
+  )
+  _ = controller.runningInputChanged(isRunningInput: false)
+
+  try expectEqual(
+    controller.deadlineElapsed(.restoreWindow),
+    [
+      .skipRestore(
+        reason: .alreadyAtOriginalInputSource,
+        originalInputSourceID: originalInputSourceID
+      )
+    ],
+    "当前已经是起点时不得重复切换"
+  )
+}
+
+func testUnavailableOriginalSkipsRestore() throws {
+  let controller = confirmedVoiceController()
+  let originalInputSourceID = "com.sogou.inputmethod.sogou.pinyin"
+  _ = controller.runningInputChanged(isRunningInput: false)
+
+  try expectEqual(
+    controller.deadlineElapsed(
+      .restoreWindow,
+      isOriginalInputSourceAvailable: false
     ),
-    [.skipRestore(reason: .currentInputSourceChangedBeforeRestore)],
-    "恢复前用户已经手动切走输入法时不得恢复"
+    [
+      .skipRestore(
+        reason: .originalInputSourceUnavailable,
+        originalInputSourceID: originalInputSourceID
+      )
+    ],
+    "起点输入法不可用时应放弃恢复"
   )
-  try expectEqual(controller.stateDescription, "idle", "放弃恢复后应回到 idle")
 }
 
-func testShortcutTimeoutBeforeDoubaoInputSourceDoesNotRestore() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  _ = controller.shortcutObserved(currentInputSource: .other("com.apple.keylayout.ABC"), elapsedMilliseconds: 0)
-  try expectEqual(
-    controller.timeoutElapsed(reason: .doubaoInputSource, elapsedMilliseconds: 1_100),
-    [.skipRestore(reason: .doubaoInputSourceTimedOut)],
-    "快捷键后超时未切到豆包应放弃"
+func testNextCandidateUsesCurrentSourceAfterExpiry() throws {
+  let controller = VoiceInputRestoreController()
+  controller.synchronizeCurrentInputSource(.other("input.A"))
+  _ = controller.currentInputSourceChanged(
+    to: .other("input.B"),
+    recognitionWindowMilliseconds: 3_000
   )
-  try expectEqual(controller.stateDescription, "idle", "输入法切换超时后应回到 idle")
+  _ = controller.deadlineElapsed(.recognitionWindow)
+
+  _ = controller.currentInputSourceChanged(to: .doubao, recognitionWindowMilliseconds: 3_000)
+
+  try expectEqual(controller.originalInputSourceID, "input.B", "新窗口应使用当前稳定输入法作为起点")
 }
 
-func testUnavailableOriginalInputSourceDoesNotRestore() throws {
-  let controller = VoiceInputRestoreController(configuration: .test)
-
-  _ = controller.shortcutObserved(currentInputSource: .other("com.apple.keylayout.ABC"), elapsedMilliseconds: 0)
-  _ = controller.currentInputSourceChanged(to: .doubao, elapsedMilliseconds: 100)
-  _ = controller.runningInputChanged(isRunningInput: true, currentInputSource: .doubao, elapsedMilliseconds: 200)
-  _ = controller.runningInputChanged(isRunningInput: false, currentInputSource: .doubao, elapsedMilliseconds: 500)
-
-  try expectEqual(
-    controller.restoreWindowElapsed(
-      currentInputSource: .doubao,
-      isOriginalInputSourceAvailable: false,
-      elapsedMilliseconds: 1_000
-    ),
-    [.skipRestore(reason: .originalInputSourceUnavailable)],
-    "原输入法为空或不可用时不得恢复"
-  )
-  try expectEqual(controller.stateDescription, "idle", "原输入法不可用后应回到 idle")
-}
-
-private extension VoiceInputRestoreConfiguration {
-  static let test = VoiceInputRestoreConfiguration(
-    doubaoInputSourceTimeoutMilliseconds: 1_000,
-    runningInputStartTimeoutMilliseconds: 1_500,
-    restoreStabilityDelayMilliseconds: 500
-  )
+private func confirmedVoiceController() -> VoiceInputRestoreController {
+  let controller = VoiceInputRestoreController()
+  controller.synchronizeCurrentInputSource(.other("com.sogou.inputmethod.sogou.pinyin"))
+  _ = controller.currentInputSourceChanged(to: .doubao, recognitionWindowMilliseconds: 3_000)
+  _ = controller.runningInputChanged(isRunningInput: true)
+  return controller
 }
 
 let tests: [(String, () throws -> Void)] = [
-  ("testStartsPreparing", testStartsPreparing),
-  ("testBecomesRunningWhenRequiredPrerequisitesAreReady", testBecomesRunningWhenRequiredPrerequisitesAreReady),
-  ("testPauseAndResume", testPauseAndResume),
-  ("testMissingPrerequisiteOverridesPausedStatus", testMissingPrerequisiteOverridesPausedStatus),
-  ("testRemainsPreparingWhenAnyRequiredPrerequisiteIsMissing", testRemainsPreparingWhenAnyRequiredPrerequisiteIsMissing),
-  ("testDoubaoShortcutDisplaysSelectedPhysicalKeysInStableOrder", testDoubaoShortcutDisplaysSelectedPhysicalKeysInStableOrder),
-  ("testDoubaoShortcutRejectsEmptySelection", testDoubaoShortcutRejectsEmptySelection),
-  ("testDoubaoShortcutMatchesOnlyExactSelectedKeySet", testDoubaoShortcutMatchesOnlyExactSelectedKeySet),
-  ("testDoubaoShortcutRoundTripsStorageValue", testDoubaoShortcutRoundTripsStorageValue),
-  (
-    "testShortcutPressObserverIgnoresUnconfiguredBridgeModifiers",
-    testShortcutPressObserverIgnoresUnconfiguredBridgeModifiers
-  ),
-  (
-    "testShortcutPressObserverRejectsExtraPhysicalModifiers",
-    testShortcutPressObserverRejectsExtraPhysicalModifiers
-  ),
-  (
-    "testShortcutPressObserverResetClearsIncompletePress",
-    testShortcutPressObserverResetClearsIncompletePress
-  ),
-  (
-    "testDefaultDoubaoInputSourceTimeoutIsTwoSeconds",
-    testDefaultDoubaoInputSourceTimeoutIsTwoSeconds
-  ),
-  (
-    "testDefaultRunningInputStartTimeoutIsTwoSeconds",
-    testDefaultRunningInputStartTimeoutIsTwoSeconds
-  ),
-  (
-    "testShortcutDuringExistingVoiceDoesNotStartRestoreChain",
-    testShortcutDuringExistingVoiceDoesNotStartRestoreChain
-  ),
-  (
-    "testObservedShortcutFromOtherInputSourceRestoresAfterRunningInputStops",
-    testObservedShortcutFromOtherInputSourceRestoresAfterRunningInputStops
-  ),
-  (
-    "testRepeatedShortcutDuringStartupPreservesOriginalInputSource",
-    testRepeatedShortcutDuringStartupPreservesOriginalInputSource
-  ),
-  (
-    "testRunningInputObservationStartsOnlyAfterDoubaoSelection",
-    testRunningInputObservationStartsOnlyAfterDoubaoSelection
-  ),
-  ("testShortcutFromDoubaoInputSourceDoesNotRestore", testShortcutFromDoubaoInputSourceDoesNotRestore),
-  ("testManualSwitchToDoubaoWithoutShortcutDoesNotRestore", testManualSwitchToDoubaoWithoutShortcutDoesNotRestore),
-  ("testRunningInputNeverStartsBeforeTimeoutDoesNotRestore", testRunningInputNeverStartsBeforeTimeoutDoesNotRestore),
-  (
-    "testTransientInputSourceDuringRunningInputWaitDoesNotLoseOriginalSource",
-    testTransientInputSourceDuringRunningInputWaitDoesNotLoseOriginalSource
-  ),
-  (
-    "testTransientInputSourceStillTimesOutWhenRunningInputNeverStarts",
-    testTransientInputSourceStillTimesOutWhenRunningInputNeverStarts
-  ),
-  (
-    "testVoiceKeepsTrackingAcrossTransientInputSourceChange",
-    testVoiceKeepsTrackingAcrossTransientInputSourceChange
-  ),
-  (
-    "testRunningInputAfterSourceRollbackKeepsRestoreChain",
-    testRunningInputAfterSourceRollbackKeepsRestoreChain
-  ),
-  ("testRestoreWaitsForStabilityDelay", testRestoreWaitsForStabilityDelay),
-  ("testUserSwitchesAwayBeforeRestoreDoesNotRestore", testUserSwitchesAwayBeforeRestoreDoesNotRestore),
-  ("testShortcutTimeoutBeforeDoubaoInputSourceDoesNotRestore", testShortcutTimeoutBeforeDoubaoInputSourceDoesNotRestore),
-  ("testUnavailableOriginalInputSourceDoesNotRestore", testUnavailableOriginalInputSourceDoesNotRestore),
+  ("testReadinessRequiresOnlyDoubaoInputSource", testReadinessRequiresOnlyDoubaoInputSource),
+  ("testRecognitionWindowPolicy", testRecognitionWindowPolicy),
+  ("testInitialInputSourceOnlyEstablishesBaseline", testInitialInputSourceOnlyEstablishesBaseline),
+  ("testLeavingInputSourceStartsRecognitionWindow", testLeavingInputSourceStartsRecognitionWindow),
+  ("testIntermediateInputSourcesDoNotReplaceOriginal", testIntermediateInputSourcesDoNotReplaceOriginal),
+  ("testReturningToOriginalCancelsCandidate", testReturningToOriginalCancelsCandidate),
+  ("testRunningInputRequiresDoubaoDuringWindow", testRunningInputRequiresDoubaoDuringWindow),
+  ("testRecognitionWindowExpiryDoesNotRestore", testRecognitionWindowExpiryDoesNotRestore),
+  ("testVoiceEndSchedulesStableRestore", testVoiceEndSchedulesStableRestore),
+  ("testVoiceRestartCancelsPendingRestore", testVoiceRestartCancelsPendingRestore),
+  ("testConfirmedVoiceAlwaysRestoresOriginal", testConfirmedVoiceAlwaysRestoresOriginal),
+  ("testAlreadyAtOriginalSkipsSelection", testAlreadyAtOriginalSkipsSelection),
+  ("testUnavailableOriginalSkipsRestore", testUnavailableOriginalSkipsRestore),
+  ("testNextCandidateUsesCurrentSourceAfterExpiry", testNextCandidateUsesCurrentSourceAfterExpiry),
 ]
 
 do {

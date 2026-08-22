@@ -1,158 +1,131 @@
+import AppKit
 import DoubaoVoiceSwitchCore
 import SwiftUI
 
 struct MenuBarView: View {
-  @Environment(\.openSettings) private var openSettings
   @ObservedObject var model: AppModel
 
+  @AppStorage("recognitionWindowSeconds") private var recognitionWindowSeconds =
+    VoiceSessionRecognitionPolicy.defaultWindowSeconds
+  @AppStorage("launchAtLogin") private var launchAtLogin = false
+
+  private let recognitionWindowPresets = [1.0, 1.5, 2.0, 3.0, 5.0]
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack(alignment: .center, spacing: 10) {
-        VoiceLauncherGlyph(size: 34, color: model.status.tint)
-          .frame(width: 34, height: 34)
+    Text("状态：\(model.statusTitle)")
 
-        VStack(alignment: .leading, spacing: 5) {
-          Text("豆包语音切换器")
-            .font(.headline)
-            .lineLimit(1)
+    if let failure = model.lastFailureMessage {
+      Text(shortMenuText(failure))
+    }
 
-          StatusDot(status: model.status)
-        }
+    if !model.isDoubaoInputSourceAvailable {
+      Text("未检测到豆包输入法")
+    }
+
+    Divider()
+
+    Button(model.status == .paused ? "继续观察" : "暂停观察") {
+      if model.status == .paused {
+        model.resume()
+      } else {
+        model.pause()
       }
+    }
 
-      if let failure = model.lastFailureMessage {
-        Text(failure)
-          .font(.caption)
-          .foregroundStyle(.red)
-          .lineLimit(2)
-      }
-
-      Divider()
-        .padding(.top, 1)
-
-      if !missingPrerequisites.isEmpty {
-        VStack(spacing: 8) {
-          ForEach(missingPrerequisites) { item in
-            if item.id == "accessibility" {
-              MenuActionButton(
-                systemImage: "exclamationmark.circle.fill",
-                title: "授权辅助功能权限",
-                iconStyle: .orange
-              ) {
-                model.openAccessibilitySettings()
-              }
-            } else {
-              MenuReadinessRow(item: item)
-            }
+    Menu("识别窗口：\(formattedWindowSeconds) 秒") {
+      ForEach(recognitionWindowPresets, id: \.self) { seconds in
+        Button {
+          recognitionWindowSeconds = seconds
+        } label: {
+          if isSelected(seconds) {
+            Label(formatSeconds(seconds), systemImage: "checkmark")
+          } else {
+            Text(formatSeconds(seconds))
           }
         }
-
-        Divider()
-      }
-
-      MenuActionButton(
-        systemImage: model.status == .paused ? "play.circle" : "pause.circle",
-        title: model.status == .paused ? "继续" : "暂停"
-      ) {
-        if model.status == .paused {
-          model.resume()
-        } else {
-          model.pause()
-        }
-      }
-
-      MenuActionButton(systemImage: "gearshape", title: "设置") {
-        openAppSettings()
       }
 
       Divider()
 
-      MenuActionButton(systemImage: "power", title: "退出") {
-        NSApplication.shared.terminate(nil)
+      Button("自定义…") {
+        presentRecognitionWindowEditor()
       }
     }
-    .padding(10)
-    .frame(width: 200, alignment: .leading)
-    .fixedSize(horizontal: false, vertical: true)
-    .id(menuLayoutID)
+
+    Toggle("开机启动", isOn: $launchAtLogin)
+
+    Divider()
+
+    Button("打开日志文件夹") {
+      model.openLogFolder()
+    }
+
+    Button("清空日志", role: .destructive) {
+      model.clearLogs()
+    }
+
+    Divider()
+
+    Button("退出豆包语音切换器") {
+      NSApplication.shared.terminate(nil)
+    }
+    .keyboardShortcut("q")
+    .onChange(of: launchAtLogin) {
+      model.setLaunchAtLogin(launchAtLogin)
+    }
+    .onAppear {
+      launchAtLogin = model.isLaunchAtLoginEnabled()
+    }
   }
 
-  private var missingPrerequisites: [PrerequisiteItem] {
-    model.prerequisites.filter { !$0.isReady }
+  private var formattedWindowSeconds: String {
+    formatSeconds(recognitionWindowSeconds)
   }
 
-  private var menuLayoutID: String {
-    "\(model.statusTitle)-\(missingPrerequisites.map(\.id).joined(separator: ","))-\(model.lastFailureMessage ?? "")"
+  private func formatSeconds(_ seconds: Double) -> String {
+    String(format: "%.1f", seconds)
   }
 
-  private func openAppSettings() {
+  private func isSelected(_ seconds: Double) -> Bool {
+    abs(recognitionWindowSeconds - seconds) < 0.05
+  }
+
+  private func shortMenuText(_ text: String) -> String {
+    guard text.count > 30 else {
+      return text
+    }
+    return String(text.prefix(27)) + "…"
+  }
+
+  private func presentRecognitionWindowEditor() {
+    let alert = NSAlert()
+    alert.messageText = "设置识别窗口"
+    alert.informativeText = "请输入 0.0 到 10.0 秒，最多保留一位小数。"
+    alert.alertStyle = .informational
+    alert.addButton(withTitle: "设置")
+    alert.addButton(withTitle: "取消")
+
+    let formatter = NumberFormatter()
+    formatter.numberStyle = .decimal
+    formatter.minimum = 0
+    formatter.maximum = 10
+    formatter.minimumFractionDigits = 1
+    formatter.maximumFractionDigits = 1
+    formatter.allowsFloats = true
+
+    let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+    input.alignment = .right
+    input.formatter = formatter
+    input.doubleValue = recognitionWindowSeconds
+    alert.accessoryView = input
+
     NSApplication.shared.activate(ignoringOtherApps: true)
-    openSettings()
-    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120)) {
-      NSApplication.shared.activate(ignoringOtherApps: true)
-      NSApplication.shared.windows
-        .filter(\.isVisible)
-        .forEach { window in
-          window.makeKeyAndOrderFront(nil)
-          window.orderFrontRegardless()
-        }
+    guard alert.runModal() == .alertFirstButtonReturn else {
+      return
     }
-  }
-}
 
-private struct StatusDot: View {
-  let status: AppStatus
-
-  var body: some View {
-    Text(status.title)
-      .font(.caption.weight(.medium))
-    .foregroundStyle(status.tint)
-    .padding(.horizontal, 8)
-    .padding(.vertical, 3)
-    .background(status.tint.opacity(0.12), in: Capsule())
-  }
-}
-
-private struct MenuReadinessRow: View {
-  let item: PrerequisiteItem
-
-  var body: some View {
-    HStack(alignment: .center, spacing: 9) {
-      Image(systemName: item.isReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-        .foregroundStyle(item.isReady ? .green : .orange)
-        .frame(width: 18)
-
-      VStack(alignment: .leading, spacing: 2) {
-        Text(item.title)
-          .font(.subheadline.weight(.medium))
-        Text(item.detail)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .lineLimit(2)
-      }
-
-      Spacer()
-    }
-  }
-}
-
-private struct MenuActionButton: View {
-  let systemImage: String
-  let title: String
-  var iconStyle: Color = .secondary
-  let action: () -> Void
-
-  var body: some View {
-    Button(action: action) {
-      HStack(spacing: 9) {
-        Image(systemName: systemImage)
-          .foregroundStyle(iconStyle)
-          .frame(width: 18)
-        Text(title)
-        Spacer()
-      }
-      .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain)
+    recognitionWindowSeconds = VoiceSessionRecognitionPolicy.normalizedWindowSeconds(
+      input.doubleValue
+    )
   }
 }

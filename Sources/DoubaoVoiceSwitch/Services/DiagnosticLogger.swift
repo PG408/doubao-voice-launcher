@@ -2,7 +2,7 @@ import Foundation
 
 enum DiagnosticLogCategory: String, Equatable {
   case app
-  case shortcut
+  case recognition
   case inputSource
   case voiceReadiness
   case restoration
